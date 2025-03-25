@@ -42,8 +42,8 @@ module BitStuffer
   output logic out
 );
 
-  logic [$clog2(WIDTH)-1:0] index;
-  logic [$clog2(WIDTH)-1:0] onesCount;
+  logic [$clog2(WIDTH):0] index;
+  logic [$clog2(WIDTH):0] onesCount;
   always_ff @(posedge clock, negedge reset_n) begin
     if (reset_n == 0) begin 
       onesCount <= 0;
@@ -136,7 +136,7 @@ module OutPacket (
   ///////////////////////////
 
   //bit stuffer logic
-  logic [23:0] parallelIn;
+  logic [15:0] parallelIn;
   logic ready, out, finished;
   ///////////////////////////
 
@@ -154,12 +154,13 @@ module OutPacket (
 
   //OTHER PACKET INFO
   logic [7:0] SYNC_pattern;
-  logic [7:0] PID;
+  logic [7:0] PID, PID_reverse;
+  logic [15:0] Pattern;
   logic [6:0] address, reverse_address;
   logic [3:0] endpoint, reverse_endpoint;
   //////////////////////////
 
-  BitStuffer #(24) BS (.parallelIn(parallelIn),
+  BitStuffer #(16) BS (.parallelIn(parallelIn),
                 .ready(ready),
                 .clock(clock), 
                 .reset_n(reset_n), 
@@ -179,6 +180,7 @@ module OutPacket (
                 .out(CRC_out));
 
 
+
   //Reverse
   Reverse #(7) address_reverse (.in(address), .out(reverse_address));
   Reverse #(4) endpoint_reverse (.in(endpoint), .out(reverse_endpoint));
@@ -191,13 +193,20 @@ module OutPacket (
   //PID assign 
   assign SYNC_pattern = 8'b0000_0001;
   assign PID = 8'b1110_0001;
-  assign address = 7'd63;//`DEVICE_ADDR;
-  assign endpoint = `DATA_ENDP;  
+  assign PID_reverse = 8'b1000_0111;
 
-  assign parallelIn[7:0] = PID;
-  assign parallelIn[14:8] = address;
-  assign parallelIn[18:15] = endpoint;
-  assign parallelIn[23:19] = ~CRC_reverse_out;
+  assign Pattern[15:8] = SYNC_pattern;
+  assign Pattern[7:0] = PID_reverse;
+  
+
+  assign address = `DEVICE_ADDR;
+  assign endpoint = 4'd4;  
+
+  // assign parallelIn[7:0] = PID;
+
+  assign parallelIn[6:0] = address;
+  assign parallelIn[10:7] = endpoint;
+  assign parallelIn[15:11] = ~CRC_reverse_out;
   
   //control variables
   logic [3:0] SYNC_index;  
@@ -227,11 +236,12 @@ module OutPacket (
   always_ff @(negedge reset_n, posedge clock) begin 
     if (~reset_n) begin 
       enable <= 0;
-      SYNC_index <= 4'd7; //start out by sending the SYNC at MSB
+      SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
       SYNC_done <= 1'b0;
       SE0_count <= 4'b0;
       enable <= 0;
       finishedOut <= 0;
+      sendSE0 <= 0;
     end
     else begin 
       if (startOut) begin 
@@ -239,7 +249,7 @@ module OutPacket (
         NRZI_ready <= 1;
         if (~SYNC_done) begin
           enable <= 1;
-          NRZI_stream <= SYNC_pattern[SYNC_index];
+          NRZI_stream <= Pattern[SYNC_index];
           SYNC_index <= SYNC_index - 1;
           if (SYNC_index == 1) begin
             ready <= 1; //start bit stuffer
@@ -277,9 +287,13 @@ OutPacket DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(
 task prelabRequest();  
   start = 1;
   $display("%b", DUT.parallelIn);
+  $display("%b", DUT.parallelIn[7:0]);
+  $display("%b", DUT.parallelIn[14:8]);
+  $display("%b", DUT.parallelIn[18:15]);
+
   while (!finished) begin 
     @(posedge clock);
-    $display("%b, %b, %b", wires.DP, wires.DM, DUT.NRZI_stream);
+    $display("%b, %b, %b FINISHED: %b", wires.DP, wires.DM, DUT.NRZI_stream, DUT.BS.finished);
   end
 endtask : prelabRequest
 
