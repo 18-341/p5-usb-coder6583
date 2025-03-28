@@ -65,7 +65,7 @@ module BitStuffer
             onesCount <= 0;
           end
           index <= index + 1;
-          if (index == WIDTH) begin 
+          if (index == WIDTH & onesCount != 6) begin 
             finished <= 1;
           end
         end  
@@ -123,7 +123,9 @@ module Reverse
 endmodule : Reverse
 
 
-module OutPacket (
+module InOutPacket 
+#(TYPE = 0) //0 for OUT, 1 for IN
+(
   input logic startOut,
   input logic clock, reset_n,
   output logic finishedOut,
@@ -192,7 +194,7 @@ module OutPacket (
 
   //PID assign 
   assign SYNC_pattern = 8'b0000_0001;
-  assign PID = 8'b1110_0001;
+  assign PID = TYPE ? 8'b0110_1001 : 8'b1110_0001;
   assign PID_reverse = 8'b1000_0111;
 
   assign Pattern[15:8] = SYNC_pattern;
@@ -200,7 +202,7 @@ module OutPacket (
   
 
   assign address = `DEVICE_ADDR;
-  assign endpoint = 4'd4;  
+  assign endpoint = `ADDR_ENDP;  
 
   // assign parallelIn[7:0] = PID;
 
@@ -232,7 +234,6 @@ module OutPacket (
     end
   end
 
-  
   always_ff @(negedge reset_n, posedge clock) begin 
     if (~reset_n) begin 
       enable <= 0;
@@ -243,58 +244,70 @@ module OutPacket (
       finishedOut <= 0;
       sendSE0 <= 0;
     end
-    else begin 
-      if (startOut) begin 
-        CRC_ready <= 1; 
-        NRZI_ready <= 1;
-        if (~SYNC_done) begin
-          enable <= 1;
-          NRZI_stream <= Pattern[SYNC_index];
-          SYNC_index <= SYNC_index - 1;
-          if (SYNC_index == 1) begin
-            ready <= 1; //start bit stuffer
-          end
-          if (SYNC_index == 0) begin
-            SYNC_done <= 1; 
-          end
+    else if (startOut) begin 
+      CRC_ready <= 1; 
+      NRZI_ready <= 1;
+      if (~SYNC_done) begin
+        enable <= 1;
+        NRZI_stream <= Pattern[SYNC_index];
+        SYNC_index <= SYNC_index - 1;
+        if (SYNC_index == 1) begin
+          ready <= 1; //start bit stuffer
         end
-        else if (~finished) begin 
-          NRZI_stream <= out;
-        end
-        else if (SE0_count < 2) begin 
-          SE0_count <= SE0_count + 1;
-          sendSE0 <= 1;
-        end
-        else begin 
-          idle <= 1;
-          finishedOut <= 1;
-          enable <= 0;
+        if (SYNC_index == 0) begin
+          SYNC_done <= 1; 
         end
       end
+      else if (~finished) begin 
+        NRZI_stream <= out;
+      end
+      else if (SE0_count < 2) begin 
+        SE0_count <= SE0_count + 1;
+        sendSE0 <= 1;
+      end
+      else begin 
+        idle <= 1;
+        finishedOut <= 1;
+        enable <= 0;
+      end
+    end
+    else begin 
+      //restart the entire sequence so we can
+      //send more packets
+      enable <= 0;
+      SYNC_index <= 4'd15; 
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
     end
   end
-endmodule : OutPacket
+endmodule : InOutPacket
 
 
 module USBHost (
   USBWires wires,
   input logic clock, reset_n
 );
-logic start;
-logic finished;
-OutPacket DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(finished), .wires(wires));
 
+logic startOut, startIn;
+logic finishedOut, finishedIn;
+
+InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n), .finishedOut(finishedOut), .wires(wires));
+InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .finishedOut(finishedIn), .wires(wires));
+
+//PRELAB task sends an Out packet
 task prelabRequest();  
-  start = 1;
-  $display("%b", DUT.parallelIn);
-  $display("%b", DUT.parallelIn[7:0]);
-  $display("%b", DUT.parallelIn[14:8]);
-  $display("%b", DUT.parallelIn[18:15]);
-
-  while (!finished) begin 
-    @(posedge clock);
-    $display("%b, %b, %b FINISHED: %b", wires.DP, wires.DM, DUT.NRZI_stream, DUT.BS.finished);
-  end
+  // startOut = 1;
+  // wait(finishedOut);
+  // startOut = 0;
+  // @(posedge clock);
+  // $display("%b", IN.PID);
+  startOut = 1;
+  wait(finishedOut);
+  startOut = 0;
+  @(posedge clock);
 endtask : prelabRequest
 
 task readData
@@ -307,6 +320,11 @@ task readData
 
   data = 64'h0;
   success = 1'b0;
+
+  startOut = 1;
+  wait(finishedOut);
+  startOut = 0;
+  
 
 endtask : readData
 

@@ -17,7 +17,7 @@
   // Some common USB values
   `define SYNC 8'b00000001
   //Below is for prelab
-  //`define DEVICE_ADDR 7'h3F
+  // `define DEVICE_ADDR 7'h3F
   //Below is for final
   `define DEVICE_ADDR 7'h5
   `define ADDR_ENDP 4'h4
