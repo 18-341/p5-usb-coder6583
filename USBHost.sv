@@ -110,6 +110,52 @@ module CRC5
   end
 endmodule : CRC5
 
+
+module CRC16
+#(WIDTH = 64)
+(
+  input logic [WIDTH-1:0] parallelIn,
+  input logic ready,
+  input logic clock,
+  input logic reset_n,
+  output logic done,
+  output logic [15:0] out
+);
+  logic [$clog2(WIDTH):0] index;
+  logic stillGoing;
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (reset_n == 0) begin 
+      out <= 16'hFFFF;
+      index <= WIDTH-1;
+      stillGoing <= 1;
+    end
+    else begin
+      if (ready & stillGoing) begin 
+        out[0] <= out[15] ^ parallelIn[index];
+        out[1] <= out[0];
+        out[2] <= out[15] ^ parallelIn[index] ^ out[1];
+        out[3] <= out[2];
+        out[4] <= out[3];
+        out[5] <= out[4];
+        out[6] <= out[5];
+        out[7] <= out[6];
+        out[8] <= out[7];
+        out[9] <= out[8];
+        out[10] <= out[9];
+        out[11] <= out[10];
+        out[12] <= out[11];
+        out[13] <= out[12];
+        out[14] <= out[13];
+        out[15] <= out[15] ^ parallelIn[index] ^ out[14];
+        index <= index-1;
+      end
+      if (index == 0) begin 
+        stillGoing <= 0;
+      end
+    end
+  end
+endmodule : CRC16
+
 module Reverse
 #(WIDTH = 7)
 (input logic [WIDTH-1:0] in,
@@ -195,7 +241,7 @@ module InOutPacket
   //PID assign 
   assign SYNC_pattern = 8'b0000_0001;
   assign PID = TYPE ? 8'b0110_1001 : 8'b1110_0001;
-  assign PID_reverse = 8'b1000_0111;
+  assign PID_reverse = TYPE ? 8'b1001_0110 : 8'b1000_0111;
 
   assign Pattern[15:8] = SYNC_pattern;
   assign Pattern[7:0] = PID_reverse;
@@ -285,6 +331,154 @@ module InOutPacket
   end
 endmodule : InOutPacket
 
+module DataPacket 
+(
+  input logic startOut,
+  input logic [63:0] data,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  USBWires wires
+);
+  //tri state wire driving logic
+  logic enable;
+  logic [1:0] bus;
+  logic sendSE0, idle;
+  ///////////////////////////
+
+  //bit stuffer logic
+  logic [79:0] parallelIn;
+  logic ready, out, finished;
+  ///////////////////////////
+
+  //NRZI logic
+  logic NRZI_stream;
+  logic NRZI_ready;
+  logic NRZI_out;
+  ///////////////////////////
+
+  //CRC logic
+  logic [63:0] CRC_in;
+  logic CRC_ready;
+  logic [15:0] CRC_out, CRC_reverse_out;
+  ///////////////////////////
+
+  //OTHER PACKET INFO
+  logic [7:0] SYNC_pattern;
+  logic [7:0] PID, PID_reverse;
+  logic [15:0] Pattern;
+  //////////////////////////
+
+  BitStuffer #(80) BS (.parallelIn(parallelIn),
+                .ready(ready),
+                .clock(clock), 
+                .reset_n(reset_n), 
+                .out(out),
+                .finished(finished));
+
+  NRZI N (.stream(NRZI_stream),
+          .ready(NRZI_ready),
+          .clock(clock), 
+          .reset_n(reset_n),
+          .out(NRZI_out));
+
+  CRC16 #(64) C (.parallelIn(CRC_in),
+                .ready(CRC_ready),
+                .clock(clock),
+                .reset_n(reset_n),
+                .out(CRC_out));
+
+  //Reverse
+  Reverse #(64) DATA_reverse (.in(data), .out(CRC_in));
+  Reverse #(16) CRC_reverse (.in(CRC_out), .out(CRC_reverse_out));
+  //////////////////////////
+
+  //PID assign 
+  assign SYNC_pattern = 8'b0000_0001;
+  assign PID = 8'b1100_0011;
+  assign PID_reverse = 8'b1100_0011;
+
+  assign Pattern[15:8] = SYNC_pattern;
+  assign Pattern[7:0] = PID_reverse;
+  
+
+  assign parallelIn[63:0] = data;
+  assign parallelIn[79:64] = ~CRC_reverse_out;
+  
+  //control variables
+  logic [3:0] SYNC_index;  
+  logic SYNC_done;
+
+  logic [3:0] SE0_count;
+  /////////////////////////////
+
+
+  assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
+
+  always_comb begin 
+    if (sendSE0) begin 
+      bus = BS_SE0;
+    end
+    else begin 
+      if (NRZI_out) begin 
+        bus = BS_J;
+      end
+      else begin 
+        bus = BS_K;
+      end
+    end
+  end
+
+  always_ff @(negedge reset_n, posedge clock) begin 
+    if (~reset_n) begin 
+      enable <= 0;
+      SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+    else if (startOut) begin 
+      CRC_ready <= 1; 
+      NRZI_ready <= 1;
+      if (~SYNC_done) begin
+        enable <= 1;
+        NRZI_stream <= Pattern[SYNC_index];
+        SYNC_index <= SYNC_index - 1;
+        if (SYNC_index == 1) begin
+          ready <= 1; //start bit stuffer
+        end
+        if (SYNC_index == 0) begin
+          SYNC_done <= 1; 
+        end
+      end
+      else if (~finished) begin 
+        NRZI_stream <= out;
+      end
+      else if (SE0_count < 2) begin 
+        SE0_count <= SE0_count + 1;
+        sendSE0 <= 1;
+      end
+      else begin 
+        idle <= 1;
+        finishedOut <= 1;
+        enable <= 0;
+      end
+    end
+    else begin 
+      //restart the entire sequence so we can
+      //send more packets
+      enable <= 0;
+      SYNC_index <= 4'd15; 
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+  end
+endmodule : DataPacket
+
 
 module USBHost (
   USBWires wires,
@@ -294,9 +488,12 @@ module USBHost (
 logic startOut, startIn;
 logic finishedOut, finishedIn;
 
+logic startData, finishedData;
+logic [63:0] data;
+
 InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n), .finishedOut(finishedOut), .wires(wires));
 InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .finishedOut(finishedIn), .wires(wires));
-
+DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
 //PRELAB task sends an Out packet
 task prelabRequest();  
   // startOut = 1;
@@ -304,9 +501,15 @@ task prelabRequest();
   // startOut = 0;
   // @(posedge clock);
   // $display("%b", IN.PID);
-  startOut = 1;
-  wait(finishedOut);
-  startOut = 0;
+  data = 64'h0000FFFF0000FFFF;
+  startData = 1;
+  // wait(finishedData);
+  $display("parallel in %b", Test.parallelIn);
+  while (!finishedData) begin 
+    @(posedge clock);
+    $display("wtc %b, %b", Test.NRZI_stream, Test.CRC_out);
+  end
+  startData = 0;
   @(posedge clock);
 endtask : prelabRequest
 
@@ -324,8 +527,6 @@ task readData
   startOut = 1;
   wait(finishedOut);
   startOut = 0;
-  
-
 endtask : readData
 
 task writeData
