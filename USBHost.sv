@@ -32,6 +32,29 @@ module NRZI (
   end
 endmodule : NRZI
 
+
+
+module NRZI_decode (
+  input logic stream,
+  input logic ready,
+  input logic clock, reset_n,
+  output logic out
+);
+  logic prev;
+  always_comb begin
+    out = prev == stream;
+  end
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (reset_n == 0) begin
+      prev <= 1'b1;
+    end else begin
+      if (ready) begin
+        prev <= stream;
+      end
+    end
+  end
+endmodule : NRZI_decode
+
 module BitStuffer 
 #(WIDTH = 24)
 (
@@ -74,7 +97,46 @@ module BitStuffer
   end
 endmodule : BitStuffer
 
+module BitUnstuffer 
+#(WIDTH = 24)
+(
+  input logic ready,
+  input logic in,
+  input logic clock, reset_n,
+  output logic finished,
+  output logic [WIDTH-1 : 0] parallelOut
+);
 
+  logic [$clog2(WIDTH):0] index;
+  logic [$clog2(WIDTH):0] onesCount;
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (reset_n == 0) begin 
+      onesCount <= 0;
+      index <= 0;
+      finished <= 0;
+    end
+    else begin 
+      if (ready & ~finished) begin 
+        if (onesCount == 6) begin
+          onesCount <= 0;
+        end
+        else begin 
+          parallelOut[index] <= in;
+          if (in) begin 
+            onesCount <= onesCount + 1;
+          end
+          else begin 
+            onesCount <= 0;
+          end
+          index <= index + 1;
+          if (index == WIDTH & onesCount != 6) begin 
+            finished <= 1;
+          end
+        end  
+      end
+    end
+  end
+endmodule : BitUnstuffer
 
 module CRC5
 #(WIDTH = 11)
@@ -480,13 +542,200 @@ module DataPacket
 endmodule : DataPacket
 
 
+
+module DataInPacket (
+  USBWires wires,
+  input logic start,
+  input logic clock, reset_n,
+  output logic incorrect,
+  output logic finished
+);
+  //Sync logic
+  logic [5:0] SYNC_count;
+  logic readingSync;
+  logic badStream;
+
+  //PID logic 
+  logic [5:0] PID_count;
+  logic readingPID;
+  logic [8:0] PID;
+  
+  //NRZI logic
+  logic stream; 
+  logic NRZI_ready;
+  logic NRZI_in;
+  logic NRZI_output;
+
+  //Bit stuffer logic
+  logic BU_ready;
+  logic BU_finished;
+  logic [79:0] BU_out;
+
+  //EOP logic
+  logic readingEOP;
+  logic [5:0] SE0_count;
+
+  //CRC check logic
+  logic CRC_ready;
+  logic [15:0] CRC_extract, CRC_negated_final,CRC_final;
+  logic CRC_done;
+  logic [15:0] CRC_out;
+  logic [63:0] CRC_in;
+
+  //Set sync logic
+  always_comb begin 
+    if (wires.DP == 0 && wires.DM == 1) begin 
+      stream = 0; //restart count
+      badStream = 0;
+    end
+    else if (wires.DP == 1 && wires.DM == 0) begin 
+      stream = 1;
+      badStream = 0;
+    end
+    else begin
+      stream = 1;
+      badStream = 1;
+    end
+  end
+
+
+  //Set CRC logic
+  assign CRC_extract = BU_out[79:64];
+  Reverse #(16) CRC_reverse (.in(CRC_extract), .out(CRC_negated_final));
+  assign CRC_final = ~CRC_negated_final;
+  Reverse #(64) data_reverse(.in(BU_out[63:0]), .out(CRC_in));
+
+  NRZI_decode #(80) ND (
+  .stream(stream),
+  .ready(NRZI_ready),
+  .clock(clock), 
+  .reset_n(reset_n),
+  .out(NRZI_output));
+
+  BitUnstuffer #(80) BU (
+  .ready(BU_ready),
+  .in(NRZI_output),
+  .clock(clock), 
+  .reset_n(reset_n),
+  .finished(BU_finished),
+  .parallelOut(BU_out));
+
+  CRC16 #(64) (
+  .parallelIn(CRC_in),
+  .ready(CRC_ready),
+  .clock(clock),
+  .reset_n(reset_n),
+  .done(CRC_done),
+  .out(CRC_out));
+
+  always_ff @(posedge clock, negedge reset_n) begin 
+    if (reset_n) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+
+      PID_count <= 0;
+      readingPID <= 0;
+
+      BU_ready <= 0;
+
+      readingEOP <= 1;
+      SE0_count <= 1;
+
+      incorrect <= 0;
+      finished <= 0;
+    end
+    if (!finished && start) begin 
+      NRZI_ready <= 1;
+      if (readingSync) begin 
+        if (SYNC_count < 7) begin 
+          if (NRZI_output == 0 & ~badStream) begin 
+            SYNC_count <= SYNC_count+1; 
+          end
+          else begin 
+            SYNC_count <= 0; //restart count
+          end
+        end
+        else if (SYNC_count == 7) begin 
+          if (NRZI_output == 1 & ~badStream) begin 
+            readingSync <= 0; //no longer reading SYNC
+            readingPID <= 1;
+          end
+          else begin 
+            SYNC_count <= 0;
+          end
+        end
+      end
+      else if (readingPID) begin 
+        if (PID_count < 8) begin 
+          if (~badStream) begin 
+            PID[PID_count] <= NRZI_output;
+            PID_count <= PID_count + 1;
+          end
+          else begin 
+            incorrect <= 1;
+            finished <= 1;
+          end
+        end
+        else begin 
+          readingPID <= 0;
+        end
+      end
+      else if (!BU_finished) begin 
+        if ((PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin 
+          incorrect <= 1;
+          finished <= 1;
+        end
+        else begin 
+          incorrect <= 1;
+          finished <= 1;
+        end
+      end
+      else if (BU_finished && readingEOP) begin 
+        if (SE0_count < 2) begin 
+          if (wires.DP == 0 && wires.DM == 0) begin 
+            SE0_count <= SE0_count + 1;
+          end
+          else begin 
+            incorrect <= 1;
+            finished <= 1;
+          end
+        end
+        else begin 
+          if (wires.DP != 1'bz || wires.DM != 1'bz) begin
+            incorrect <= 1;
+            finished <= 1;
+          end
+          else begin 
+            readingEOP <= 0;
+          end
+        end
+      end
+      else if (!CRC_done) begin
+        //keep computing
+      end
+      else begin 
+        if (CRC_out != CRC_final) begin 
+          incorrect <= 1;
+          finished <= 1;
+        end
+      end
+    end
+  end
+endmodule : DataInPacket
+
+
+
+
+
 module USBHost (
   USBWires wires,
   input logic clock, reset_n
 );
 
-logic startOut, startIn;
-logic finishedOut, finishedIn;
+logic startOut, startIn, startDataIn;
+logic incorrect;
+logic finishedOut, finishedIn, finishedDataIn;
 
 logic startData, finishedData;
 logic [63:0] data;
@@ -494,6 +743,7 @@ logic [63:0] data;
 InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n), .finishedOut(finishedOut), .wires(wires));
 InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .finishedOut(finishedIn), .wires(wires));
 DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
+DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn));
 //PRELAB task sends an Out packet
 task prelabRequest();  
   // startOut = 1;
@@ -503,13 +753,26 @@ task prelabRequest();
   // $display("%b", IN.PID);
   data = 64'h0000FFFF0000FFFF;
   startData = 1;
+  startDataIn = 1;
   // wait(finishedData);
   $display("parallel in %b", Test.parallelIn);
   while (!finishedData) begin 
     @(posedge clock);
-    $display("wtc %b, %b", Test.NRZI_stream, Test.CRC_out);
+    // $display("%b, %b", Test.NRZI_stream, Test.CRC_out);
+    $display("NRZI out: %b, REF: %b", Test2.NRZI_output,Test.NRZI_stream);
+
   end
   startData = 0;
+  startDataIn = 1;
+  $display("FINISHED SENDING PACKET");
+  $display("%h", Test2.BU_out);
+  $display("%b", finishedDataIn);
+  $display("%d %b", Test2.SYNC_count, Test2.readingSync);
+  for (int i = 0; i < 10; i++) begin
+    @(posedge clock);
+    $display("POOOOOOO");
+    $display("%h", Test2.BU_out);
+  end
   @(posedge clock);
 endtask : prelabRequest
 
