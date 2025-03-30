@@ -470,6 +470,120 @@ module InOutPacket
   end
 endmodule : InOutPacket
 
+
+module AckNackPacket 
+#(TYPE = 0) //0 for NACK, 1 for ACK
+(
+  input logic startOut,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  USBWires wires
+);
+  //tri state wire driving logic
+  logic enable;
+  logic [1:0] bus;
+  logic sendSE0, idle;
+  ///////////////////////////
+
+
+  //NRZI logic
+  logic NRZI_stream;
+  logic NRZI_ready;
+  logic NRZI_out;
+  ///////////////////////////
+
+  //OTHER PACKET INFO
+  logic [7:0] SYNC_pattern;
+  logic [7:0] PID, PID_reverse;
+  logic [15:0] Pattern;
+  //////////////////////////
+
+
+  NRZI N (.stream(NRZI_stream),
+          .ready(NRZI_ready),
+          .clock(clock), 
+          .reset_n(reset_n),
+          .out(NRZI_out));
+
+
+  //PID assign 
+  assign SYNC_pattern = 8'b0000_0001;
+  assign PID = TYPE ? 8'b1101_0010 : 8'b0101_1010;
+  assign PID_reverse = TYPE ? 8'b0100_1011 : 8'b0101_1010;
+
+  assign Pattern[15:8] = SYNC_pattern;
+  assign Pattern[7:0] = PID_reverse;
+  
+ 
+  
+  //control variables
+  logic [3:0] SYNC_index;  
+  logic SYNC_done;
+
+  logic [3:0] SE0_count;
+  /////////////////////////////
+
+
+  assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
+
+  always_comb begin 
+    if (sendSE0) begin 
+      bus = BS_SE0;
+    end
+    else begin 
+      if (NRZI_out) begin 
+        bus = BS_J;
+      end
+      else begin 
+        bus = BS_K;
+      end
+    end
+  end
+
+  always_ff @(negedge reset_n, posedge clock) begin 
+    if (~reset_n) begin 
+      enable <= 0;
+      SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+    else if (startOut) begin 
+      NRZI_ready <= 1;
+      if (~SYNC_done) begin
+        enable <= 1;
+        NRZI_stream <= Pattern[SYNC_index];
+        SYNC_index <= SYNC_index - 1;
+        if (SYNC_index == 0) begin
+          SYNC_done <= 1; 
+        end
+      end
+      else if (SE0_count < 2) begin 
+        SE0_count <= SE0_count + 1;
+        sendSE0 <= 1;
+      end
+      else begin 
+        idle <= 1;
+        finishedOut <= 1;
+        enable <= 0;
+      end
+    end
+    else begin 
+      //restart the entire sequence so we can
+      //send more packets
+      enable <= 0;
+      SYNC_index <= 4'd15; 
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+  end
+endmodule : AckNackPacket
+
 module DataPacket 
 (
   input logic startOut,
@@ -798,45 +912,24 @@ module USBHost (
   input logic clock, reset_n
 );
 
-logic startOut, startIn, startDataIn;
+logic startOut, startIn, startDataIn, startAck, startNack;
 logic incorrect;
-logic finishedOut, finishedIn, finishedDataIn;
+logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack;
 
 logic startData, finishedData;
 logic [63:0] data;
 
 InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n), .finishedOut(finishedOut), .wires(wires));
 InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .finishedOut(finishedIn), .wires(wires));
+AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n), .finishedOut(finishedAck), .wires(wires));
+AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock), .reset_n(reset_n), .finishedOut(finishedNack), .wires(wires));
 DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
 DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn));
 //PRELAB task sends an Out packet
 task prelabRequest();  
-  // startOut = 1;
-  // wait(finishedOut);
-  // startOut = 0;
-  // @(posedge clock);
-  // $display("%b", IN.PID);
-  data = 64'h1234FFFF1234FFFF;
-  startData = 1;
-  startDataIn = 1;
-  // wait(finishedData);
-  $display("parallel in %b", Test.parallelIn);
-  while (!finishedData) begin 
-    @(posedge clock);
-    $display("%b %h %b, %h", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready, Test2.parallelOut);
-  end
-
-
-  startData = 0;
-  // for (int i = 0; i < 10; i++) begin
-  //   $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
-  //   @(posedge clock);
-  // end
-  while (!finishedDataIn) begin 
-    @(posedge clock);
-  end
-  $display("%b", incorrect);
-  // @(posedge clock);
+  startOut = 1;
+  wait (finishedOut);
+  startOut = 0;
 endtask : prelabRequest
 
 task readData
@@ -849,7 +942,6 @@ task readData
 
   data = 64'h0;
   success = 1'b0;
-
   startOut = 1;
   wait(finishedOut);
   startOut = 0;
