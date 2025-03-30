@@ -109,11 +109,12 @@ module BitUnstuffer
 
   logic [$clog2(WIDTH):0] index;
   logic [$clog2(WIDTH):0] onesCount;
+
+  assign finished = (index == WIDTH & onesCount != 6);
   always_ff @(posedge clock, negedge reset_n) begin
     if (reset_n == 0) begin 
       onesCount <= 0;
       index <= 0;
-      finished <= 0;
     end
     else begin 
       if (ready & ~finished) begin 
@@ -129,9 +130,6 @@ module BitUnstuffer
             onesCount <= 0;
           end
           index <= index + 1;
-          if (index == WIDTH & onesCount != 6) begin 
-            finished <= 1;
-          end
         end  
       end
     end
@@ -155,6 +153,7 @@ module CRC5
       out <= 5'b1_1111;
       index <= WIDTH-1;
       stillGoing <= 1;
+      done <= 0;
     end
     else begin
       if (ready & stillGoing) begin 
@@ -168,6 +167,12 @@ module CRC5
       if (index == 0) begin 
         stillGoing <= 0;
       end
+    end
+    if (!ready) begin 
+      out <= 5'b1_1111;
+      index <= WIDTH-1;
+      stillGoing <= 1;
+      done <= 0;
     end
   end
 endmodule : CRC5
@@ -190,6 +195,7 @@ module CRC16
       out <= 16'hFFFF;
       index <= WIDTH-1;
       stillGoing <= 1;
+      done <= 0;
     end
     else begin
       if (ready & stillGoing) begin 
@@ -215,8 +221,77 @@ module CRC16
         stillGoing <= 0;
       end
     end
+    if (!ready) begin
+      out <= 16'hFFFF;
+      index <= WIDTH-1;
+      stillGoing <= 1;
+      done <= 0;
+    end
   end
 endmodule : CRC16
+
+
+module CRC16_checker
+#(WIDTH = 80)
+(
+  input logic in,
+  input logic ready,
+  input logic clock,
+  input logic reset_n,
+  output logic done,
+  output logic [15:0] out
+);
+  logic [$clog2(WIDTH):0] index;
+  logic [$clog2(WIDTH):0] onesCount;
+
+  assign done = (index == WIDTH & onesCount != 6);
+
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (reset_n == 0) begin 
+      out <= 16'hFFFF;
+      index <= 0;
+      onesCount <= 0;
+    end
+    else if (ready & ~done) begin 
+      if (onesCount == 6) begin 
+        onesCount <= 0;
+      end
+      else begin 
+        index <= index+1;
+        if (in) begin 
+          onesCount <= onesCount + 1;
+        end
+        else begin 
+          onesCount <= 0;
+        end
+        out[0] <= out[15] ^ in;
+        out[1] <= out[0];
+        out[2] <= out[15] ^ in ^ out[1];
+        out[3] <= out[2];
+        out[4] <= out[3];
+        out[5] <= out[4];
+        out[6] <= out[5];
+        out[7] <= out[6];
+        out[8] <= out[7];
+        out[9] <= out[8];
+        out[10] <= out[9];
+        out[11] <= out[10];
+        out[12] <= out[11];
+        out[13] <= out[12];
+        out[14] <= out[13];
+        out[15] <= out[15] ^ in ^ out[14];
+      end
+    end
+    else if (!ready) begin
+    out <= 16'hFFFF;
+    index <= 0;
+    onesCount <= 0;
+  end
+  end
+  
+endmodule : CRC16_checker
+
+
 
 module Reverse
 #(WIDTH = 7)
@@ -582,6 +657,7 @@ module DataInPacket (
   logic [15:0] CRC_out;
   logic [63:0] CRC_in;
 
+
   //Set sync logic
   always_comb begin 
     if (wires.DP == 0 && wires.DM == 1) begin 
@@ -620,8 +696,8 @@ module DataInPacket (
   .finished(BU_finished),
   .parallelOut(BU_out));
 
-  CRC16 #(64) (
-  .parallelIn(CRC_in),
+  CRC16_checker (
+  .in(NRZI_output),
   .ready(CRC_ready),
   .clock(clock),
   .reset_n(reset_n),
@@ -629,19 +705,16 @@ module DataInPacket (
   .out(CRC_out));
 
   always_ff @(posedge clock, negedge reset_n) begin 
-    if (reset_n) begin 
+    if (~reset_n) begin 
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
-
       PID_count <= 0;
       readingPID <= 0;
-
       BU_ready <= 0;
-
       readingEOP <= 1;
-      SE0_count <= 1;
-
+      SE0_count <= 0;
+      CRC_ready <= 0;
       incorrect <= 0;
       finished <= 0;
     end
@@ -659,7 +732,7 @@ module DataInPacket (
         else if (SYNC_count == 7) begin 
           if (NRZI_output == 1 & ~badStream) begin 
             readingSync <= 0; //no longer reading SYNC
-            readingPID <= 1;
+            readingPID <= 1; 
           end
           else begin 
             SYNC_count <= 0;
@@ -667,7 +740,7 @@ module DataInPacket (
         end
       end
       else if (readingPID) begin 
-        if (PID_count < 8) begin 
+        if (PID_count < 9) begin 
           if (~badStream) begin 
             PID[PID_count] <= NRZI_output;
             PID_count <= PID_count + 1;
@@ -676,15 +749,18 @@ module DataInPacket (
             incorrect <= 1;
             finished <= 1;
           end
+          if (PID_count == 7) begin 
+            BU_ready <= 1;
+            CRC_ready <= 1;
+          end
         end
         else begin 
           readingPID <= 0;
         end
       end
       else if (!BU_finished) begin 
-        if ((PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin 
-          incorrect <= 1;
-          finished <= 1;
+        if ((PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin   
+          //move along
         end
         else begin 
           incorrect <= 1;
@@ -708,18 +784,16 @@ module DataInPacket (
           end
           else begin 
             readingEOP <= 0;
+            CRC_ready <= 1;
           end
         end
       end
       else if (!CRC_done) begin
         //keep computing
       end
-      else begin 
-        if (CRC_out != CRC_final) begin 
-          incorrect <= 1;
-          finished <= 1;
-        end
-      end
+    end
+    else begin 
+
     end
   end
 endmodule : DataInPacket
@@ -758,21 +832,17 @@ task prelabRequest();
   $display("parallel in %b", Test.parallelIn);
   while (!finishedData) begin 
     @(posedge clock);
-    // $display("%b, %b", Test.NRZI_stream, Test.CRC_out);
-    $display("NRZI out: %b, REF: %b", Test2.NRZI_output,Test.NRZI_stream);
+    $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
+  end
 
-  end
+
   startData = 0;
-  startDataIn = 1;
-  $display("FINISHED SENDING PACKET");
-  $display("%h", Test2.BU_out);
-  $display("%b", finishedDataIn);
-  $display("%d %b", Test2.SYNC_count, Test2.readingSync);
   for (int i = 0; i < 10; i++) begin
+    $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
     @(posedge clock);
-    $display("POOOOOOO");
-    $display("%h", Test2.BU_out);
   end
+  $display("%h", Test2.BU_out);
+  $display("%b", incorrect);
   @(posedge clock);
 endtask : prelabRequest
 
