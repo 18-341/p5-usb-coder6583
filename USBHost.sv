@@ -239,7 +239,8 @@ module CRC16_checker
   input logic clock,
   input logic reset_n,
   output logic done,
-  output logic [15:0] out
+  output logic [15:0] out,
+  output logic [WIDTH-1 : 0] parallelOut
 );
   logic [$clog2(WIDTH):0] index;
   logic [$clog2(WIDTH):0] onesCount;
@@ -258,6 +259,7 @@ module CRC16_checker
       end
       else begin 
         index <= index+1;
+        parallelOut[index] = in;
         if (in) begin 
           onesCount <= onesCount + 1;
         end
@@ -283,9 +285,9 @@ module CRC16_checker
       end
     end
     else if (!ready) begin
-    out <= 16'hFFFF;
-    index <= 0;
-    onesCount <= 0;
+      out <= 16'hFFFF;
+      index <= 0;
+      onesCount <= 0;
   end
   end
   
@@ -623,7 +625,8 @@ module DataInPacket (
   input logic start,
   input logic clock, reset_n,
   output logic incorrect,
-  output logic finished
+  output logic finished,
+  output logic [63:0] data
 );
   //Sync logic
   logic [5:0] SYNC_count;
@@ -641,11 +644,6 @@ module DataInPacket (
   logic NRZI_in;
   logic NRZI_output;
 
-  //Bit stuffer logic
-  logic BU_ready;
-  logic BU_finished;
-  logic [79:0] BU_out;
-
   //EOP logic
   logic readingEOP;
   logic [5:0] SE0_count;
@@ -655,8 +653,10 @@ module DataInPacket (
   logic [15:0] CRC_extract, CRC_negated_final,CRC_final;
   logic CRC_done;
   logic [15:0] CRC_out;
-  logic [63:0] CRC_in;
+  logic [79:0] parallelOut;
 
+
+  assign data = parallelOut[63:0];
 
   //Set sync logic
   always_comb begin 
@@ -674,13 +674,6 @@ module DataInPacket (
     end
   end
 
-
-  //Set CRC logic
-  assign CRC_extract = BU_out[79:64];
-  Reverse #(16) CRC_reverse (.in(CRC_extract), .out(CRC_negated_final));
-  assign CRC_final = ~CRC_negated_final;
-  Reverse #(64) data_reverse(.in(BU_out[63:0]), .out(CRC_in));
-
   NRZI_decode #(80) ND (
   .stream(stream),
   .ready(NRZI_ready),
@@ -688,21 +681,14 @@ module DataInPacket (
   .reset_n(reset_n),
   .out(NRZI_output));
 
-  BitUnstuffer #(80) BU (
-  .ready(BU_ready),
-  .in(NRZI_output),
-  .clock(clock), 
-  .reset_n(reset_n),
-  .finished(BU_finished),
-  .parallelOut(BU_out));
-
   CRC16_checker (
   .in(NRZI_output),
   .ready(CRC_ready),
   .clock(clock),
   .reset_n(reset_n),
   .done(CRC_done),
-  .out(CRC_out));
+  .out(CRC_out),
+  .parallelOut(parallelOut));
 
   always_ff @(posedge clock, negedge reset_n) begin 
     if (~reset_n) begin 
@@ -711,7 +697,6 @@ module DataInPacket (
       NRZI_ready <= 0;
       PID_count <= 0;
       readingPID <= 0;
-      BU_ready <= 0;
       readingEOP <= 1;
       SE0_count <= 0;
       CRC_ready <= 0;
@@ -750,7 +735,6 @@ module DataInPacket (
             finished <= 1;
           end
           if (PID_count == 7) begin 
-            BU_ready <= 1;
             CRC_ready <= 1;
           end
         end
@@ -758,16 +742,17 @@ module DataInPacket (
           readingPID <= 0;
         end
       end
-      else if (!BU_finished) begin 
-        if ((PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin   
-          //move along
-        end
-        else begin 
+      else if (!CRC_done) begin 
+        if (badStream | ~(PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin   
           incorrect <= 1;
           finished <= 1;
         end
       end
-      else if (BU_finished && readingEOP) begin 
+      else if (CRC_done && readingEOP) begin 
+        if (CRC_out != 16'h800D) begin 
+          incorrect <= 1;
+          finished <= 1;
+        end
         if (SE0_count < 2) begin 
           if (wires.DP == 0 && wires.DM == 0) begin 
             SE0_count <= SE0_count + 1;
@@ -784,16 +769,22 @@ module DataInPacket (
           end
           else begin 
             readingEOP <= 0;
-            CRC_ready <= 1;
+            finished <= 1;
           end
         end
       end
-      else if (!CRC_done) begin
-        //keep computing
-      end
     end
-    else begin 
-
+    if (!start) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      CRC_ready <= 0;
+      incorrect <= 0;
+      finished <= 0;
     end
   end
 endmodule : DataInPacket
@@ -825,25 +816,27 @@ task prelabRequest();
   // startOut = 0;
   // @(posedge clock);
   // $display("%b", IN.PID);
-  data = 64'h0000FFFF0000FFFF;
+  data = 64'h1234FFFF1234FFFF;
   startData = 1;
   startDataIn = 1;
   // wait(finishedData);
   $display("parallel in %b", Test.parallelIn);
   while (!finishedData) begin 
     @(posedge clock);
-    $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
+    $display("%b %h %b, %h", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready, Test2.parallelOut);
   end
 
 
   startData = 0;
-  for (int i = 0; i < 10; i++) begin
-    $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
+  // for (int i = 0; i < 10; i++) begin
+  //   $display("%b %h %b", Test2.CRC_done, Test2.CRC_out, Test2.CRC_ready);
+  //   @(posedge clock);
+  // end
+  while (!finishedDataIn) begin 
     @(posedge clock);
   end
-  $display("%h", Test2.BU_out);
   $display("%b", incorrect);
-  @(posedge clock);
+  // @(posedge clock);
 endtask : prelabRequest
 
 task readData
