@@ -738,7 +738,6 @@ module DataInPacket (
   USBWires wires,
   input logic start,
   input logic clock, reset_n,
-  output logic incorrect,
   output logic finished,
   output logic [63:0] data
 );
@@ -769,6 +768,7 @@ module DataInPacket (
   logic [15:0] CRC_out;
   logic [79:0] parallelOut;
 
+  logic incorrect;
 
   assign data = parallelOut[63:0];
 
@@ -817,7 +817,19 @@ module DataInPacket (
       incorrect <= 0;
       finished <= 0;
     end
-    if (!finished && start) begin 
+    if (incorrect) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      CRC_ready <= 0;
+      incorrect <= 0;
+      finished <= 0;
+    end
+    else if (!finished && start) begin 
       NRZI_ready <= 1;
       if (readingSync) begin 
         if (SYNC_count < 7) begin 
@@ -846,7 +858,6 @@ module DataInPacket (
           end
           else begin 
             incorrect <= 1;
-            finished <= 1;
           end
           if (PID_count == 7) begin 
             CRC_ready <= 1;
@@ -857,13 +868,11 @@ module DataInPacket (
       else if (!CRC_done) begin 
         if (badStream | ~(PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin   
           incorrect <= 1;
-          finished <= 1;
         end
       end
       else if (CRC_done && readingEOP) begin 
         if (CRC_out != 16'h800D) begin 
           incorrect <= 1;
-          finished <= 1;
         end
         if (SE0_count < 2) begin 
           if (wires.DP == 0 && wires.DM == 0) begin 
@@ -871,13 +880,11 @@ module DataInPacket (
           end
           else begin 
             incorrect <= 1;
-            finished <= 1;
           end
         end
         else begin 
           if (wires.DP != 1'bz || wires.DM != 1'bz) begin
             incorrect <= 1;
-            finished <= 1;
           end
           else begin 
             readingEOP <= 0;
@@ -1080,7 +1087,6 @@ module USBHost (
 );
 
 logic startOut, startIn, startDataIn, startAck, startNack, startAckIn, startNackIn;
-logic incorrect;
 logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn, finishedNackIn;
 
 logic startData, finishedData;
@@ -1091,7 +1097,7 @@ InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .fin
 AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n), .finishedOut(finishedAck), .wires(wires));
 AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock), .reset_n(reset_n), .finishedOut(finishedNack), .wires(wires));
 DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
-DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn), .data(dataDetected));
+DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .finished(finishedDataIn), .data(dataDetected));
 
 AckNackInPacket #(1) ACKTest (.wires(wires), .start(startAckIn), .clock(clock), .reset_n(reset_n), .finished(finishedAckIn));
 
