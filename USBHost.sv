@@ -750,7 +750,7 @@ module DataInPacket (
   //PID logic 
   logic [5:0] PID_count;
   logic readingPID;
-  logic [8:0] PID;
+  logic [7:0] PID;
   
   //NRZI logic
   logic stream; 
@@ -839,7 +839,7 @@ module DataInPacket (
         end
       end
       else if (readingPID) begin 
-        if (PID_count < 9) begin 
+        if (PID_count < 8) begin 
           if (~badStream) begin 
             PID[PID_count] <= NRZI_output;
             PID_count <= PID_count + 1;
@@ -850,10 +850,8 @@ module DataInPacket (
           end
           if (PID_count == 7) begin 
             CRC_ready <= 1;
+            readingPID <= 0;
           end
-        end
-        else begin 
-          readingPID <= 0;
         end
       end
       else if (!CRC_done) begin 
@@ -1086,21 +1084,27 @@ logic incorrect;
 logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn, finishedNackIn;
 
 logic startData, finishedData;
-logic [63:0] data;
+logic [63:0] data, dataDetected;
 
 InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n), .finishedOut(finishedOut), .wires(wires));
 InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n), .finishedOut(finishedIn), .wires(wires));
 AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n), .finishedOut(finishedAck), .wires(wires));
 AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock), .reset_n(reset_n), .finishedOut(finishedNack), .wires(wires));
 DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
-DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn));
+DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn), .data(dataDetected));
 
 AckNackInPacket #(1) ACKTest (.wires(wires), .start(startAckIn), .clock(clock), .reset_n(reset_n), .finished(finishedAckIn));
 
 
 //PRELAB task sends an Out packet
 task prelabRequest();  
-
+  startData = 1;
+  data = 64'h1234FFFF1234FFFF;
+  startDataIn = 1;
+  wait(finishedDataIn);
+  startData = 0;
+  startDataIn = 1;
+  $display("%h", dataDetected);
 endtask : prelabRequest
 
 task readData
