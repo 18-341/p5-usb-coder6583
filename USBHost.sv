@@ -905,6 +905,175 @@ endmodule : DataInPacket
 
 
 
+module AckNackInPacket 
+#(TYPE = 0) //0 for NACK, 1 for ACK
+(
+  USBWires wires,
+  input logic start,
+  input logic clock, reset_n,
+  output logic finished
+);
+  //Sync logic
+  logic [5:0] SYNC_count;
+  logic readingSync;
+  logic badStream;
+
+  //PID logic 
+  logic [5:0] PID_count;
+  logic readingPID;
+  logic [7:0] PID;
+  
+  //NRZI logic
+  logic stream; 
+  logic NRZI_ready;
+  logic NRZI_in;
+  logic NRZI_output;
+
+  //EOP logic
+  logic readingEOP;
+  logic [5:0] SE0_count;
+
+  logic incorrect;
+
+  //Set sync logic
+  always_comb begin 
+    if (wires.DP == 0 && wires.DM == 1) begin 
+      stream = 0; //restart count
+      badStream = 0;
+    end
+    else if (wires.DP == 1 && wires.DM == 0) begin 
+      stream = 1;
+      badStream = 0;
+    end
+    else begin
+      stream = 1;
+      badStream = 1;
+    end
+  end
+
+  NRZI_decode #(80) ND (
+  .stream(stream),
+  .ready(NRZI_ready),
+  .clock(clock), 
+  .reset_n(reset_n),
+  .out(NRZI_output));
+
+
+  always_ff @(posedge clock, negedge reset_n) begin 
+    if (~reset_n) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      finished <= 0;
+      incorrect <= 0;
+    end
+    if (incorrect) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      finished <= 0;
+      incorrect <= 0;
+    end
+    else if (!finished && start) begin 
+      NRZI_ready <= 1;
+      if (readingSync) begin 
+        if (SYNC_count < 7) begin 
+          if (NRZI_output == 0 & ~badStream) begin 
+            SYNC_count <= SYNC_count+1; 
+          end
+          else begin 
+            SYNC_count <= 0; //restart count
+          end
+        end
+        else if (SYNC_count == 7) begin 
+          if (NRZI_output == 1 & ~badStream) begin 
+            readingSync <= 0; //no longer reading SYNC
+            readingPID <= 1; 
+          end
+          else begin 
+            SYNC_count <= 0;
+          end
+        end
+      end
+      else if (readingPID) begin 
+        if (PID_count < 8) begin 
+          if (~badStream) begin 
+            PID[PID_count] <= NRZI_output;
+            PID_count <= PID_count + 1;
+          end
+          else begin 
+            incorrect <= 1;
+          end
+          if (PID_count == 7) begin 
+            readingPID <= 0;
+          end
+        end
+        
+      end
+      else if (readingEOP) begin 
+        if (TYPE == 0 && PID != 8'b0101_1010) begin   
+          incorrect <= 1;
+        end
+        if (TYPE == 1 && PID != 8'b1101_0010) begin   
+          incorrect <= 1;
+        end
+        if (SE0_count < 2) begin 
+          if (wires.DP == 0 && wires.DM == 0) begin 
+            SE0_count <= SE0_count + 1;
+          end
+          else begin 
+            incorrect <= 1;
+          end
+        end
+        else begin 
+          if (wires.DP != 1'bz || wires.DM != 1'bz) begin
+            incorrect <= 1;
+          end
+          else begin 
+            readingEOP <= 0;
+            finished <= 1;
+          end
+        end
+      end
+    end
+    if (!start) begin 
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      incorrect <= 0;
+      finished <= 0;
+    end
+  end
+endmodule : AckNackInPacket
+
+
+
+
+// module Read (
+//   USBWires wires,
+//   input logic [15:0] mempage,
+//   output logic [63:0] data,
+//   output logic successful
+// );
+
+
+// endmodule : Read
+
+
+
+
 
 
 module USBHost (
@@ -912,9 +1081,9 @@ module USBHost (
   input logic clock, reset_n
 );
 
-logic startOut, startIn, startDataIn, startAck, startNack;
+logic startOut, startIn, startDataIn, startAck, startNack, startAckIn, startNackIn;
 logic incorrect;
-logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack;
+logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn, finishedNackIn;
 
 logic startData, finishedData;
 logic [63:0] data;
@@ -925,11 +1094,13 @@ AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n), .
 AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock), .reset_n(reset_n), .finishedOut(finishedNack), .wires(wires));
 DataPacket Test (.startOut(startData), .data(data), .clock(clock), .reset_n(reset_n), .finishedOut(finishedData), .wires(wires));
 DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock), .reset_n(reset_n), .incorrect(incorrect), .finished(finishedDataIn));
+
+AckNackInPacket #(1) ACKTest (.wires(wires), .start(startAckIn), .clock(clock), .reset_n(reset_n), .finished(finishedAckIn));
+
+
 //PRELAB task sends an Out packet
 task prelabRequest();  
-  startOut = 1;
-  wait (finishedOut);
-  startOut = 0;
+
 endtask : prelabRequest
 
 task readData
@@ -943,8 +1114,9 @@ task readData
   data = 64'h0;
   success = 1'b0;
   startOut = 1;
-  wait(finishedOut);
-  startOut = 0;
+  for (int i = 0; i < 20; i++) begin 
+    @(posedge clock);
+  end
 endtask : readData
 
 task writeData
