@@ -143,7 +143,6 @@ module CRC5
   input logic ready,
   input logic clock,
   input logic reset_n,
-  output logic done,
   output logic [4:0] out
 );
   logic [$clog2(WIDTH)-1:0] index;
@@ -153,7 +152,6 @@ module CRC5
       out <= 5'b1_1111;
       index <= WIDTH-1;
       stillGoing <= 1;
-      done <= 0;
     end
     else begin
       if (ready & stillGoing) begin
@@ -172,7 +170,6 @@ module CRC5
       out <= 5'b1_1111;
       index <= WIDTH-1;
       stillGoing <= 1;
-      done <= 0;
     end
   end
 endmodule : CRC5
