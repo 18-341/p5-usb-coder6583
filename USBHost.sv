@@ -55,7 +55,7 @@ module NRZI_decode (
   end
 endmodule : NRZI_decode
 
-module BitStuffer 
+module BitStuffer
 #(WIDTH = 24)
 (
   input logic [WIDTH-1 : 0] parallelIn,
@@ -68,36 +68,36 @@ module BitStuffer
   logic [$clog2(WIDTH):0] index;
   logic [$clog2(WIDTH):0] onesCount;
   always_ff @(posedge clock, negedge reset_n) begin
-    if (reset_n == 0) begin 
+    if (reset_n == 0) begin
       onesCount <= 0;
       index <= 0;
       finished <= 0;
     end
-    else begin 
-      if (ready & ~finished) begin 
+    else begin
+      if (ready & ~finished) begin
         if (onesCount == 6) begin
           onesCount <= 0;
           out <= 0;
         end
-        else begin 
+        else begin
           out <= parallelIn[index];
-          if (parallelIn[index] == 1) begin 
+          if (parallelIn[index] == 1) begin
             onesCount <= onesCount + 1;
           end
-          else begin 
+          else begin
             onesCount <= 0;
           end
           index <= index + 1;
-          if (index == WIDTH & onesCount != 6) begin 
+          if (index == WIDTH & onesCount != 6) begin
             finished <= 1;
           end
-        end  
+        end
       end
     end
   end
 endmodule : BitStuffer
 
-module BitUnstuffer 
+module BitUnstuffer
 #(WIDTH = 24)
 (
   input logic ready,
@@ -112,25 +112,25 @@ module BitUnstuffer
 
   assign finished = (index == WIDTH & onesCount != 6);
   always_ff @(posedge clock, negedge reset_n) begin
-    if (reset_n == 0) begin 
+    if (reset_n == 0) begin
       onesCount <= 0;
       index <= 0;
     end
-    else begin 
-      if (ready & ~finished) begin 
+    else begin
+      if (ready & ~finished) begin
         if (onesCount == 6) begin
           onesCount <= 0;
         end
-        else begin 
+        else begin
           parallelOut[index] <= in;
-          if (in) begin 
+          if (in) begin
             onesCount <= onesCount + 1;
           end
-          else begin 
+          else begin
             onesCount <= 0;
           end
           index <= index + 1;
-        end  
+        end
       end
     end
   end
@@ -149,14 +149,14 @@ module CRC5
   logic [$clog2(WIDTH)-1:0] index;
   logic stillGoing;
   always_ff @(posedge clock, negedge reset_n) begin
-    if (reset_n == 0) begin 
+    if (reset_n == 0) begin
       out <= 5'b1_1111;
       index <= WIDTH-1;
       stillGoing <= 1;
       done <= 0;
     end
     else begin
-      if (ready & stillGoing) begin 
+      if (ready & stillGoing) begin
         out[0] <= out[4] ^ parallelIn[index];
         out[1] <= out[0];
         out[2] <= out[4] ^ parallelIn[index] ^ out[1];
@@ -164,11 +164,11 @@ module CRC5
         out[4] <= out[3];
         index <= index-1;
       end
-      if (index == 0) begin 
+      if (index == 0) begin
         stillGoing <= 0;
       end
     end
-    if (!ready) begin 
+    if (!ready) begin
       out <= 5'b1_1111;
       index <= WIDTH-1;
       stillGoing <= 1;
@@ -191,14 +191,14 @@ module CRC16
   logic [$clog2(WIDTH):0] index;
   logic stillGoing;
   always_ff @(posedge clock, negedge reset_n) begin
-    if (reset_n == 0) begin 
+    if (reset_n == 0) begin
       out <= 16'hFFFF;
       index <= WIDTH-1;
       stillGoing <= 1;
       done <= 0;
     end
     else begin
-      if (ready & stillGoing) begin 
+      if (ready & stillGoing) begin
         out[0] <= out[15] ^ parallelIn[index];
         out[1] <= out[0];
         out[2] <= out[15] ^ parallelIn[index] ^ out[1];
@@ -217,7 +217,7 @@ module CRC16
         out[15] <= out[15] ^ parallelIn[index] ^ out[14];
         index <= index-1;
       end
-      if (index == 0) begin 
+      if (index == 0) begin
         stillGoing <= 0;
       end
     end
@@ -248,22 +248,22 @@ module CRC16_checker
   assign done = (index == WIDTH & onesCount != 6);
 
   always_ff @(posedge clock, negedge reset_n) begin
-    if (reset_n == 0) begin 
+    if (reset_n == 0) begin
       out <= 16'hFFFF;
       index <= 0;
       onesCount <= 0;
     end
-    else if (ready & ~done) begin 
-      if (onesCount == 6) begin 
+    else if (ready & ~done) begin
+      if (onesCount == 6) begin
         onesCount <= 0;
       end
-      else begin 
+      else begin
         index <= index+1;
         parallelOut[index] = in;
-        if (in) begin 
+        if (in) begin
           onesCount <= onesCount + 1;
         end
-        else begin 
+        else begin
           onesCount <= 0;
         end
         out[0] <= out[15] ^ in;
@@ -290,7 +290,7 @@ module CRC16_checker
       onesCount <= 0;
   end
   end
-  
+
 endmodule : CRC16_checker
 
 
@@ -300,7 +300,7 @@ module Reverse
 (input logic [WIDTH-1:0] in,
  output logic [WIDTH-1:0] out);
   genvar i;
-  generate 
+  generate
   for (i = 0; i < WIDTH; i++) begin : ReverseBits
     assign out[i] = in[WIDTH-i-1];
   end
@@ -308,7 +308,7 @@ module Reverse
 endmodule : Reverse
 
 
-module InOutPacket 
+module InOutPacket
 #(TYPE = 0) //0 for OUT, 1 for IN
 (
   input logic startOut,
@@ -349,14 +349,14 @@ module InOutPacket
 
   BitStuffer #(16) BS (.parallelIn(parallelIn),
                 .ready(ready),
-                .clock(clock), 
-                .reset_n(reset_n), 
+                .clock(clock),
+                .reset_n(reset_n),
                 .out(out),
                 .finished(finished));
 
   NRZI N (.stream(NRZI_stream),
           .ready(NRZI_ready),
-          .clock(clock), 
+          .clock(clock),
           .reset_n(reset_n),
           .out(NRZI_out));
 
@@ -377,26 +377,26 @@ module InOutPacket
   assign CRC_in[10:4] = reverse_address; //Assign first part of CRC_in;
   assign CRC_in[3:0] = reverse_endpoint; //Assign second part of CRC_in;
 
-  //PID assign 
+  //PID assign
   assign SYNC_pattern = 8'b0000_0001;
   assign PID = TYPE ? 8'b0110_1001 : 8'b1110_0001;
   assign PID_reverse = TYPE ? 8'b1001_0110 : 8'b1000_0111;
 
   assign Pattern[15:8] = SYNC_pattern;
   assign Pattern[7:0] = PID_reverse;
-  
+
 
   assign address = `DEVICE_ADDR;
-  assign endpoint = `ADDR_ENDP;  
+  assign endpoint = `ADDR_ENDP;
 
   // assign parallelIn[7:0] = PID;
 
   assign parallelIn[6:0] = address;
   assign parallelIn[10:7] = endpoint;
   assign parallelIn[15:11] = ~CRC_reverse_out;
-  
+
   //control variables
-  logic [3:0] SYNC_index;  
+  logic [3:0] SYNC_index;
   logic SYNC_done;
 
   logic [3:0] SE0_count;
@@ -405,22 +405,22 @@ module InOutPacket
 
   assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
 
-  always_comb begin 
-    if (sendSE0) begin 
+  always_comb begin
+    if (sendSE0) begin
       bus = BS_SE0;
     end
-    else begin 
-      if (NRZI_out) begin 
+    else begin
+      if (NRZI_out) begin
         bus = BS_J;
       end
-      else begin 
+      else begin
         bus = BS_K;
       end
     end
   end
 
-  always_ff @(negedge reset_n, posedge clock) begin 
-    if (~reset_n) begin 
+  always_ff @(negedge reset_n, posedge clock) begin
+    if (~reset_n) begin
       enable <= 0;
       SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
       SYNC_done <= 1'b0;
@@ -429,8 +429,8 @@ module InOutPacket
       finishedOut <= 0;
       sendSE0 <= 0;
     end
-    else if (startOut) begin 
-      CRC_ready <= 1; 
+    else if (startOut) begin
+      CRC_ready <= 1;
       NRZI_ready <= 1;
       if (~SYNC_done) begin
         enable <= 1;
@@ -440,27 +440,27 @@ module InOutPacket
           ready <= 1; //start bit stuffer
         end
         if (SYNC_index == 0) begin
-          SYNC_done <= 1; 
+          SYNC_done <= 1;
         end
       end
-      else if (~finished) begin 
+      else if (~finished) begin
         NRZI_stream <= out;
       end
-      else if (SE0_count < 2) begin 
+      else if (SE0_count < 2) begin
         SE0_count <= SE0_count + 1;
         sendSE0 <= 1;
       end
-      else begin 
+      else begin
         idle <= 1;
         finishedOut <= 1;
         enable <= 0;
       end
     end
-    else begin 
+    else begin
       //restart the entire sequence so we can
       //send more packets
       enable <= 0;
-      SYNC_index <= 4'd15; 
+      SYNC_index <= 4'd15;
       SYNC_done <= 1'b0;
       SE0_count <= 4'b0;
       enable <= 0;
@@ -471,7 +471,7 @@ module InOutPacket
 endmodule : InOutPacket
 
 
-module AckNackPacket 
+module AckNackPacket
 #(TYPE = 0) //0 for NACK, 1 for ACK
 (
   input logic startOut,
@@ -501,23 +501,23 @@ module AckNackPacket
 
   NRZI N (.stream(NRZI_stream),
           .ready(NRZI_ready),
-          .clock(clock), 
+          .clock(clock),
           .reset_n(reset_n),
           .out(NRZI_out));
 
 
-  //PID assign 
+  //PID assign
   assign SYNC_pattern = 8'b0000_0001;
   assign PID = TYPE ? 8'b1101_0010 : 8'b0101_1010;
   assign PID_reverse = TYPE ? 8'b0100_1011 : 8'b0101_1010;
 
   assign Pattern[15:8] = SYNC_pattern;
   assign Pattern[7:0] = PID_reverse;
-  
- 
-  
+
+
+
   //control variables
-  logic [3:0] SYNC_index;  
+  logic [3:0] SYNC_index;
   logic SYNC_done;
 
   logic [3:0] SE0_count;
@@ -526,22 +526,22 @@ module AckNackPacket
 
   assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
 
-  always_comb begin 
-    if (sendSE0) begin 
+  always_comb begin
+    if (sendSE0) begin
       bus = BS_SE0;
     end
-    else begin 
-      if (NRZI_out) begin 
+    else begin
+      if (NRZI_out) begin
         bus = BS_J;
       end
-      else begin 
+      else begin
         bus = BS_K;
       end
     end
   end
 
-  always_ff @(negedge reset_n, posedge clock) begin 
-    if (~reset_n) begin 
+  always_ff @(negedge reset_n, posedge clock) begin
+    if (~reset_n) begin
       enable <= 0;
       SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
       SYNC_done <= 1'b0;
@@ -550,31 +550,31 @@ module AckNackPacket
       finishedOut <= 0;
       sendSE0 <= 0;
     end
-    else if (startOut) begin 
+    else if (startOut) begin
       NRZI_ready <= 1;
       if (~SYNC_done) begin
         enable <= 1;
         NRZI_stream <= Pattern[SYNC_index];
         SYNC_index <= SYNC_index - 1;
         if (SYNC_index == 0) begin
-          SYNC_done <= 1; 
+          SYNC_done <= 1;
         end
       end
-      else if (SE0_count < 2) begin 
+      else if (SE0_count < 2) begin
         SE0_count <= SE0_count + 1;
         sendSE0 <= 1;
       end
-      else begin 
+      else begin
         idle <= 1;
         finishedOut <= 1;
         enable <= 0;
       end
     end
-    else begin 
+    else begin
       //restart the entire sequence so we can
       //send more packets
       enable <= 0;
-      SYNC_index <= 4'd15; 
+      SYNC_index <= 4'd15;
       SYNC_done <= 1'b0;
       SE0_count <= 4'b0;
       enable <= 0;
@@ -584,7 +584,7 @@ module AckNackPacket
   end
 endmodule : AckNackPacket
 
-module DataPacket 
+module DataPacket
 (
   input logic startOut,
   input logic [63:0] data,
@@ -623,14 +623,14 @@ module DataPacket
 
   BitStuffer #(80) BS (.parallelIn(parallelIn),
                 .ready(ready),
-                .clock(clock), 
-                .reset_n(reset_n), 
+                .clock(clock),
+                .reset_n(reset_n),
                 .out(out),
                 .finished(finished));
 
   NRZI N (.stream(NRZI_stream),
           .ready(NRZI_ready),
-          .clock(clock), 
+          .clock(clock),
           .reset_n(reset_n),
           .out(NRZI_out));
 
@@ -645,20 +645,20 @@ module DataPacket
   Reverse #(16) CRC_reverse (.in(CRC_out), .out(CRC_reverse_out));
   //////////////////////////
 
-  //PID assign 
+  //PID assign
   assign SYNC_pattern = 8'b0000_0001;
   assign PID = 8'b1100_0011;
   assign PID_reverse = 8'b1100_0011;
 
   assign Pattern[15:8] = SYNC_pattern;
   assign Pattern[7:0] = PID_reverse;
-  
+
 
   assign parallelIn[63:0] = data;
   assign parallelIn[79:64] = ~CRC_reverse_out;
-  
+
   //control variables
-  logic [3:0] SYNC_index;  
+  logic [3:0] SYNC_index;
   logic SYNC_done;
 
   logic [3:0] SE0_count;
@@ -667,22 +667,22 @@ module DataPacket
 
   assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
 
-  always_comb begin 
-    if (sendSE0) begin 
+  always_comb begin
+    if (sendSE0) begin
       bus = BS_SE0;
     end
-    else begin 
-      if (NRZI_out) begin 
+    else begin
+      if (NRZI_out) begin
         bus = BS_J;
       end
-      else begin 
+      else begin
         bus = BS_K;
       end
     end
   end
 
-  always_ff @(negedge reset_n, posedge clock) begin 
-    if (~reset_n) begin 
+  always_ff @(negedge reset_n, posedge clock) begin
+    if (~reset_n) begin
       enable <= 0;
       SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
       SYNC_done <= 1'b0;
@@ -691,8 +691,8 @@ module DataPacket
       finishedOut <= 0;
       sendSE0 <= 0;
     end
-    else if (startOut) begin 
-      CRC_ready <= 1; 
+    else if (startOut) begin
+      CRC_ready <= 1;
       NRZI_ready <= 1;
       if (~SYNC_done) begin
         enable <= 1;
@@ -702,27 +702,27 @@ module DataPacket
           ready <= 1; //start bit stuffer
         end
         if (SYNC_index == 0) begin
-          SYNC_done <= 1; 
+          SYNC_done <= 1;
         end
       end
-      else if (~finished) begin 
+      else if (~finished) begin
         NRZI_stream <= out;
       end
-      else if (SE0_count < 2) begin 
+      else if (SE0_count < 2) begin
         SE0_count <= SE0_count + 1;
         sendSE0 <= 1;
       end
-      else begin 
+      else begin
         idle <= 1;
         finishedOut <= 1;
         enable <= 0;
       end
     end
-    else begin 
+    else begin
       //restart the entire sequence so we can
       //send more packets
       enable <= 0;
-      SYNC_index <= 4'd15; 
+      SYNC_index <= 4'd15;
       SYNC_done <= 1'b0;
       SE0_count <= 4'b0;
       enable <= 0;
@@ -746,13 +746,13 @@ module DataInPacket (
   logic readingSync;
   logic badStream;
 
-  //PID logic 
+  //PID logic
   logic [5:0] PID_count;
   logic readingPID;
   logic [7:0] PID;
-  
+
   //NRZI logic
-  logic stream; 
+  logic stream;
   logic NRZI_ready;
   logic NRZI_in;
   logic NRZI_output;
@@ -773,12 +773,12 @@ module DataInPacket (
   assign data = parallelOut[63:0];
 
   //Set sync logic
-  always_comb begin 
-    if (wires.DP == 0 && wires.DM == 1) begin 
+  always_comb begin
+    if (wires.DP == 0 && wires.DM == 1) begin
       stream = 0; //restart count
       badStream = 0;
     end
-    else if (wires.DP == 1 && wires.DM == 0) begin 
+    else if (wires.DP == 1 && wires.DM == 0) begin
       stream = 1;
       badStream = 0;
     end
@@ -791,7 +791,7 @@ module DataInPacket (
   NRZI_decode #(80) ND (
   .stream(stream),
   .ready(NRZI_ready),
-  .clock(clock), 
+  .clock(clock),
   .reset_n(reset_n),
   .out(NRZI_output));
 
@@ -804,8 +804,8 @@ module DataInPacket (
   .out(CRC_out),
   .parallelOut(parallelOut));
 
-  always_ff @(posedge clock, negedge reset_n) begin 
-    if (~reset_n) begin 
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (~reset_n) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -817,7 +817,7 @@ module DataInPacket (
       incorrect <= 0;
       finished <= 0;
     end
-    if (incorrect) begin 
+    if (incorrect) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -829,71 +829,71 @@ module DataInPacket (
       incorrect <= 0;
       finished <= 0;
     end
-    else if (!finished && start) begin 
+    else if (!finished && start) begin
       NRZI_ready <= 1;
-      if (readingSync) begin 
-        if (SYNC_count < 7) begin 
-          if (NRZI_output == 0 & ~badStream) begin 
-            SYNC_count <= SYNC_count+1; 
+      if (readingSync) begin
+        if (SYNC_count < 7) begin
+          if (NRZI_output == 0 & ~badStream) begin
+            SYNC_count <= SYNC_count+1;
           end
-          else begin 
+          else begin
             SYNC_count <= 0; //restart count
           end
         end
-        else if (SYNC_count == 7) begin 
-          if (NRZI_output == 1 & ~badStream) begin 
+        else if (SYNC_count == 7) begin
+          if (NRZI_output == 1 & ~badStream) begin
             readingSync <= 0; //no longer reading SYNC
-            readingPID <= 1; 
+            readingPID <= 1;
           end
-          else begin 
+          else begin
             SYNC_count <= 0;
           end
         end
       end
-      else if (readingPID) begin 
-        if (PID_count < 8) begin 
-          if (~badStream) begin 
+      else if (readingPID) begin
+        if (PID_count < 8) begin
+          if (~badStream) begin
             PID[PID_count] <= NRZI_output;
             PID_count <= PID_count + 1;
           end
-          else begin 
+          else begin
             incorrect <= 1;
           end
-          if (PID_count == 7) begin 
+          if (PID_count == 7) begin
             CRC_ready <= 1;
             readingPID <= 0;
           end
         end
       end
-      else if (!CRC_done) begin 
-        if (badStream | ~(PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin   
+      else if (!CRC_done) begin
+        if (badStream | ~(PID[0] == ~PID[4]) && (PID[1] == ~PID[5]) && (PID[2] == ~PID[7]) && (PID[3] == ~PID[7])) begin
           incorrect <= 1;
         end
       end
-      else if (CRC_done && readingEOP) begin 
-        if (CRC_out != 16'h800D) begin 
+      else if (CRC_done && readingEOP) begin
+        if (CRC_out != 16'h800D) begin
           incorrect <= 1;
         end
-        if (SE0_count < 2) begin 
-          if (wires.DP == 0 && wires.DM == 0) begin 
+        if (SE0_count < 2) begin
+          if (wires.DP == 0 && wires.DM == 0) begin
             SE0_count <= SE0_count + 1;
           end
-          else begin 
+          else begin
             incorrect <= 1;
           end
         end
-        else begin 
+        else begin
           if (wires.DP != 1'bz || wires.DM != 1'bz) begin
             incorrect <= 1;
           end
-          else begin 
+          else begin
             readingEOP <= 0;
             finished <= 1;
           end
         end
       end
     end
-    if (!start) begin 
+    if (!start) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -910,7 +910,7 @@ endmodule : DataInPacket
 
 
 
-module AckNackInPacket 
+module AckNackInPacket
 #(TYPE = 0) //0 for NACK, 1 for ACK
 (
   USBWires wires,
@@ -923,13 +923,13 @@ module AckNackInPacket
   logic readingSync;
   logic badStream;
 
-  //PID logic 
+  //PID logic
   logic [5:0] PID_count;
   logic readingPID;
   logic [7:0] PID;
-  
+
   //NRZI logic
-  logic stream; 
+  logic stream;
   logic NRZI_ready;
   logic NRZI_in;
   logic NRZI_output;
@@ -941,12 +941,12 @@ module AckNackInPacket
   logic incorrect;
 
   //Set sync logic
-  always_comb begin 
-    if (wires.DP == 0 && wires.DM == 1) begin 
+  always_comb begin
+    if (wires.DP == 0 && wires.DM == 1) begin
       stream = 0; //restart count
       badStream = 0;
     end
-    else if (wires.DP == 1 && wires.DM == 0) begin 
+    else if (wires.DP == 1 && wires.DM == 0) begin
       stream = 1;
       badStream = 0;
     end
@@ -959,13 +959,13 @@ module AckNackInPacket
   NRZI_decode #(80) ND (
   .stream(stream),
   .ready(NRZI_ready),
-  .clock(clock), 
+  .clock(clock),
   .reset_n(reset_n),
   .out(NRZI_output));
 
 
-  always_ff @(posedge clock, negedge reset_n) begin 
-    if (~reset_n) begin 
+  always_ff @(posedge clock, negedge reset_n) begin
+    if (~reset_n) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -976,7 +976,7 @@ module AckNackInPacket
       finished <= 0;
       incorrect <= 0;
     end
-    if (incorrect) begin 
+    if (incorrect) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -987,69 +987,69 @@ module AckNackInPacket
       finished <= 0;
       incorrect <= 0;
     end
-    else if (!finished && start) begin 
+    else if (!finished && start) begin
       NRZI_ready <= 1;
-      if (readingSync) begin 
-        if (SYNC_count < 7) begin 
-          if (NRZI_output == 0 & ~badStream) begin 
-            SYNC_count <= SYNC_count+1; 
+      if (readingSync) begin
+        if (SYNC_count < 7) begin
+          if (NRZI_output == 0 & ~badStream) begin
+            SYNC_count <= SYNC_count+1;
           end
-          else begin 
+          else begin
             SYNC_count <= 0; //restart count
           end
         end
-        else if (SYNC_count == 7) begin 
-          if (NRZI_output == 1 & ~badStream) begin 
+        else if (SYNC_count == 7) begin
+          if (NRZI_output == 1 & ~badStream) begin
             readingSync <= 0; //no longer reading SYNC
-            readingPID <= 1; 
+            readingPID <= 1;
           end
-          else begin 
+          else begin
             SYNC_count <= 0;
           end
         end
       end
-      else if (readingPID) begin 
-        if (PID_count < 8) begin 
-          if (~badStream) begin 
+      else if (readingPID) begin
+        if (PID_count < 8) begin
+          if (~badStream) begin
             PID[PID_count] <= NRZI_output;
             PID_count <= PID_count + 1;
           end
-          else begin 
+          else begin
             incorrect <= 1;
           end
-          if (PID_count == 7) begin 
+          if (PID_count == 7) begin
             readingPID <= 0;
           end
         end
-        
+
       end
-      else if (readingEOP) begin 
-        if (TYPE == 0 && PID != 8'b0101_1010) begin   
+      else if (readingEOP) begin
+        if (TYPE == 0 && PID != 8'b0101_1010) begin
           incorrect <= 1;
         end
-        if (TYPE == 1 && PID != 8'b1101_0010) begin   
+        if (TYPE == 1 && PID != 8'b1101_0010) begin
           incorrect <= 1;
         end
-        if (SE0_count < 2) begin 
-          if (wires.DP == 0 && wires.DM == 0) begin 
+        if (SE0_count < 2) begin
+          if (wires.DP == 0 && wires.DM == 0) begin
             SE0_count <= SE0_count + 1;
           end
-          else begin 
+          else begin
             incorrect <= 1;
           end
         end
-        else begin 
+        else begin
           if (wires.DP != 1'bz || wires.DM != 1'bz) begin
             incorrect <= 1;
           end
-          else begin 
+          else begin
             readingEOP <= 0;
             finished <= 1;
           end
         end
       end
     end
-    if (!start) begin 
+    if (!start) begin
       SYNC_count <= 0;
       readingSync <= 1;
       NRZI_ready <= 0;
@@ -1103,15 +1103,11 @@ AckNackInPacket #(1) ACKTest (.wires(wires), .start(startAckIn), .clock(clock), 
 
 
 //PRELAB task sends an Out packet
-task prelabRequest();  
-  startData = 1;
-  data = 64'h1234FFFF1234FFFF;
-  startDataIn = 1;
-  wait(finishedDataIn);
-  startData = 0;
-  startDataIn = 1;
-  $display("%h", dataDetected);
-endtask : prelabRequest
+task prelabRequest();
+    startOut = 1;
+    wait(finishedOut);
+    startOut = 0;
+endtask: prelabRequest
 
 task readData
 // Host sends mempage to thumb drive using a READ (OUT->DATA0->IN->DATA0)
@@ -1124,7 +1120,7 @@ task readData
   data = 64'h0;
   success = 1'b0;
   startOut = 1;
-  for (int i = 0; i < 20; i++) begin 
+  for (int i = 0; i < 20; i++) begin
     @(posedge clock);
   end
 endtask : readData
