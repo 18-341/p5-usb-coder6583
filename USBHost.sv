@@ -1082,13 +1082,12 @@ module ReadWriteFSM (
     output logic [63:0] dataReceived
 );
 
-    logic waiting, address, buffer, reading, writing, is_done, is_error;
+    logic waiting, address, reading, writing, is_done, is_error;
 
     // Output from the FSM
     assign read_write_FSM_done = is_done;
     assign isValueReadCorrect = ~is_error;
     assign success = ~is_error;
-    assign {wires.DP, wires.DM} = buffer ? BS_SE0 : BS_NC;
 
     always_comb begin
         in_start = 1'b0; out_start = 1'b0;
@@ -1114,7 +1113,6 @@ module ReadWriteFSM (
         if (~reset_n) begin
             waiting <= 1'b1;
             address <= 1'b0;
-            buffer <= 1'b0;
             reading <= 1'b0;
             writing <= 1'b0;
             is_done <= 1'b0;
@@ -1147,16 +1145,6 @@ module ReadWriteFSM (
                 if (startRead) begin
                     reading <= 1'b1;
                 end else if (startWrite) begin
-                    writing <= 1'b1;
-                end
-            end
-            // BUFFER
-            else if (buffer) begin
-                if (startRead) begin
-                    buffer <= 1'b0;
-                    reading <= 1'b1;
-                end else if (startWrite) begin
-                    buffer <= 1'b0;
                     writing <= 1'b1;
                 end
             end
