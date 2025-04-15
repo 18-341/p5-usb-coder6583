@@ -328,7 +328,6 @@ module CRC16 #(WIDTH = 64) (
                 out[14] <= out[13];
                 out[15] <= (out[15] ^ parallelIn[idx]) ^ out[14];
                 if (idxEnd) begin
-                    idx <= '0;
                     calc <= 1'b0;
                     is_done <= 1'b1;
                 end else begin
@@ -667,11 +666,14 @@ CRC16Checker #80 crccheck(.clock, .reset_n, .stream, .ready, .done,
 
 task testCRC16Checker();
     crc16ready <= 1'b1;
-    parallelIn <= 64'hF809_4389_0991_2021;
+    parallelIn <= 64'h40aa_11b7_682d_f6d8;
+    @(posedge clock);
+    crc16ready <= 1'b0;
     while(!crc16done)
         @(posedge clock);
     ready <= 1'b1;
     @(posedge clock);
+    ready <= 1'b0;
     for (int i = 63; i >= 0; i=i-1) begin
         stream <= parallelIn[i];
         @(posedge clock);
@@ -683,12 +685,13 @@ task testCRC16Checker();
     @(posedge clock);
     @(posedge clock);
     assert(done) else $error("done not asserted");
-    assert(correct) else $error("correct not asserted: %b", crc16);
+    assert(correct) else $error("correct not asserted: %x", crc16);
 endtask: testCRC16Checker
 
 task prelabRequest();
   start = 0;
 
+  testCRC16Checker();
 //  while (!finished) begin
 //    @(posedge clock);
 //  end
