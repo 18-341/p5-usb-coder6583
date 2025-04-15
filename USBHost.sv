@@ -297,20 +297,20 @@ module CRC16 #(WIDTH = 64) (
     output logic [15:0] out
 );
     logic [$clog2(WIDTH)-1:0] idx;
-    logic calc, is_done;
+    logic calcing, is_done;
     logic idxEnd;
 
     assign idxEnd = idx == 0;
     assign done = is_done;
 
     always_ff @(posedge clock, negedge reset_n) begin
-        if (~reset_n) begin
+        if (~reset_n | ~ready) begin
             out <= 16'hffff;
             idx <= WIDTH - 1;
-            calc <= 1'b0;
+            calcing <= 1'b1;
             is_done <= 1'b0;
         end else begin
-            if (calc) begin
+            if (ready & calcing) begin
                 out[0] <= out[15] ^ parallelIn[idx];
                 out[1] <= out[0];
                 out[2] <= (out[15] ^ parallelIn[idx]) ^ out[1];
@@ -327,25 +327,11 @@ module CRC16 #(WIDTH = 64) (
                 out[13] <= out[12];
                 out[14] <= out[13];
                 out[15] <= (out[15] ^ parallelIn[idx]) ^ out[14];
-                if (idxEnd) begin
-                    calc <= 1'b0;
-                    is_done <= 1'b1;
-                end else begin
-                    idx <= idx - 1;
-                end
-            end else if (is_done) begin
-                is_done <= 1'b0;
-                if (ready) begin
-                    calc <= 1'b1;
-                    out <= 16'hffff;
-                    idx <= WIDTH - 1;
-                end
-            end else begin
-                if (ready) begin
-                    calc <= 1'b1;
-                    idx <= WIDTH - 1;
-                    out <= 16'hffff;
-                end
+                idx <= idx - 1;
+            end
+            if (idx == 0) begin
+                calcing <= 1'b0;
+                is_done <= 1'b1;
             end
         end
     end
@@ -425,8 +411,8 @@ module Reverse
   endgenerate
 endmodule : Reverse
 
-
-module OutPacket (
+// TYPE: 0 is IN, 1 is OUT
+module InOutPacket #(TYPE = 0) (
   input logic startOut,
   input logic clock, reset_n,
   output logic finishedOut,
@@ -482,8 +468,6 @@ module OutPacket (
                 .reset_n(reset_n),
                 .out(CRC_out));
 
-
-
   //Reverse
   Reverse #(7) address_reverse (.in(address), .out(reverse_address));
   Reverse #(4) endpoint_reverse (.in(endpoint), .out(reverse_endpoint));
@@ -495,8 +479,8 @@ module OutPacket (
 
   //PID assign
   assign SYNC_pattern = 8'b0000_0001;
-  assign PID = 8'b1110_0001;
-  assign PID_reverse = 8'b1000_0111;
+  assign PID = TYPE ? 8'b1110_0001 : 8'b0110_1001;
+  assign PID_reverse = TYPE ? 8'b1000_0111 : 8'b1001_0110;
 
   assign Pattern[15:8] = SYNC_pattern;
   assign Pattern[7:0] = PID_reverse;
@@ -576,7 +560,7 @@ module OutPacket (
       end
     end
   end
-endmodule : OutPacket
+endmodule : InOutPacket
 
 
 module USBHost (
@@ -585,7 +569,7 @@ module USBHost (
 );
 logic start;
 logic finished;
-OutPacket DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(finished), .wires(wires));
+InOutPacket #0 DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(finished), .wires(wires));
 
 // Testing for NRZI
 // logic stream, ready, out, check;
@@ -656,45 +640,42 @@ OutPacket DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(
 // endtask: testCRC5Checker
 
 // Testing for CRC16 checker
-logic stream, ready, done, correct, crc16done, crc16ready;
-logic [63:0] parallelIn;
-logic [15:0] crc16;
-CRC16 crc(.parallelIn, .ready(crc16ready), .done(crc16done), .out(crc16),
-         .clock, .reset_n);
-CRC16Checker #80 crccheck(.clock, .reset_n, .stream, .ready, .done,
-                         .correct);
-
-task testCRC16Checker();
-    crc16ready <= 1'b1;
-    parallelIn <= 64'h40aa_11b7_682d_f6d8;
-    @(posedge clock);
-    crc16ready <= 1'b0;
-    while(!crc16done)
-        @(posedge clock);
-    ready <= 1'b1;
-    @(posedge clock);
-    ready <= 1'b0;
-    for (int i = 63; i >= 0; i=i-1) begin
-        stream <= parallelIn[i];
-        @(posedge clock);
-    end
-    for (int i = 15; i >= 0; i=i-1) begin
-        stream <= ~crc16[i];
-        @(posedge clock);
-    end
-    @(posedge clock);
-    @(posedge clock);
-    assert(done) else $error("done not asserted");
-    assert(correct) else $error("correct not asserted: %x", crc16);
-endtask: testCRC16Checker
+// logic stream, ready, done, correct, crc16done, crc16ready;
+// logic [63:0] parallelIn;
+// logic [15:0] crc16;
+// CRC16 crc(.parallelIn, .ready(crc16ready), .done(crc16done), .out(crc16),
+//          .clock, .reset_n);
+// CRC16Checker #80 crccheck(.clock, .reset_n, .stream, .ready, .done,
+//                          .correct);
+//
+// task testCRC16Checker();
+//     crc16ready <= 1'b1;
+//     parallelIn <= 64'h40aa_11b7_682d_f6d8;
+//     while(!crc16done)
+//         @(posedge clock);
+//     ready <= 1'b1;
+//     @(posedge clock);
+//     ready <= 1'b0;
+//     for (int i = 63; i >= 0; i=i-1) begin
+//         stream <= parallelIn[i];
+//         @(posedge clock);
+//     end
+//     for (int i = 15; i >= 0; i=i-1) begin
+//         stream <= ~crc16[i];
+//         @(posedge clock);
+//     end
+//     @(posedge clock);
+//     @(posedge clock);
+//     assert(done) else $error("done not asserted");
+//     assert(correct) else $error("correct not asserted: %x", crc16);
+// endtask: testCRC16Checker
 
 task prelabRequest();
-  start = 0;
+  start = 1;
 
-  testCRC16Checker();
-//  while (!finished) begin
-//    @(posedge clock);
-//  end
+  while (!finished) begin
+    @(posedge clock);
+  end
 endtask : prelabRequest
 
 task readData
