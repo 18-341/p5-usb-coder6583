@@ -341,6 +341,7 @@ module CRC16Checker #(WIDTH = 64) (
     input logic clock, reset_n,
     input logic stream,
     input logic ready,
+    input logic hold,
     output logic done, correct
 );
     logic [15:0] ffs;
@@ -359,7 +360,7 @@ module CRC16Checker #(WIDTH = 64) (
             calc <= 1'b0;
             is_done <= 1'b0;
         end else begin
-            if (calc & ~cycleDone) begin
+            if (calc & ~cycleDone & ~hold) begin
                 ffs[0] <= ffs[15] ^ stream;
                 ffs[1] <= ffs[0];
                 ffs[2] <= (ffs[15] ^ stream) ^ ffs[1];
@@ -378,9 +379,9 @@ module CRC16Checker #(WIDTH = 64) (
                 ffs[15] <= (ffs[15] ^ stream) ^ ffs[14];
             end
             if (calc) begin
-                if (~cycleDone) begin
+                if (~cycleDone & ~hold) begin
                     cnt <= cnt + 1;
-                end else begin
+                end else if (cycleDone) begin
                     cnt <= '0;
                     calc <= 1'b0;
                     is_done <= 1'b1;
@@ -562,6 +563,564 @@ module InOutPacket #(TYPE = 0) (
   end
 endmodule : InOutPacket
 
+module DataPacket (
+  input logic startOut,
+  input logic [63:0] data,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  USBWires wires
+);
+  //tri state wire driving logic
+  logic enable;
+  logic [1:0] bus;
+  logic sendSE0, idle;
+  ///////////////////////////
+
+  //bit stuffer logic
+  logic [79:0] parallelIn;
+  logic ready, out, finished;
+  ///////////////////////////
+
+  //NRZI logic
+  logic NRZI_stream;
+  logic NRZI_ready;
+  logic NRZI_out;
+  ///////////////////////////
+
+  //CRC logic
+  logic [63:0] CRC_in;
+  logic CRC_ready;
+  logic [15:0] CRC_out, CRC_reverse_out;
+  ///////////////////////////
+
+  //OTHER PACKET INFO
+  logic [7:0] SYNC_pattern;
+  logic [7:0] PID, PID_reverse;
+  logic [15:0] Pattern;
+  //////////////////////////
+
+  BitStuffer #(80) BS (.parallelIn(parallelIn),
+                .ready(ready),
+                .clock(clock),
+                .reset_n(reset_n),
+                .out(out),
+                .finished(finished));
+
+  NRZI N (.stream(NRZI_stream),
+          .ready(NRZI_ready),
+          .clock(clock),
+          .reset_n(reset_n),
+          .out(NRZI_out));
+
+  CRC16 #(64) C (.parallelIn(CRC_in),
+                .ready(CRC_ready),
+                .clock(clock),
+                .reset_n(reset_n),
+                .out(CRC_out));
+
+  //Reverse
+  Reverse #(64) data_reverse(.in(data), .out(CRC_in));
+  Reverse #(16) CRC_reverse (.in(CRC_out), .out(CRC_reverse_out));
+  //////////////////////////
+
+  //PID assign
+  assign SYNC_pattern = 8'b0000_0001;
+  assign PID = 8'b1100_0011;
+  assign PID_reverse = 8'b1100_0011;
+
+  assign Pattern[15:8] = SYNC_pattern;
+  assign Pattern[7:0] = PID_reverse;
+
+  assign parallelIn[63:0] = data;
+  assign parallelIn[79:64] = ~CRC_reverse_out;
+
+  //control variables
+  logic [3:0] SYNC_index;
+  logic SYNC_done;
+
+  logic [3:0] SE0_count;
+  /////////////////////////////
+
+
+  assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
+
+  always_comb begin
+    if (sendSE0) begin
+      bus = BS_SE0;
+    end
+    else begin
+      if (NRZI_out) begin
+        bus = BS_J;
+      end
+      else begin
+        bus = BS_K;
+      end
+    end
+  end
+
+
+  always_ff @(negedge reset_n, posedge clock) begin
+    if (~reset_n) begin
+      enable <= 0;
+      SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+    else begin
+      if (startOut) begin
+        CRC_ready <= 1;
+        NRZI_ready <= 1;
+        if (~SYNC_done) begin
+          enable <= 1;
+          NRZI_stream <= Pattern[SYNC_index];
+          SYNC_index <= SYNC_index - 1;
+          if (SYNC_index == 1) begin
+            ready <= 1; //start bit stuffer
+          end
+          if (SYNC_index == 0) begin
+            SYNC_done <= 1;
+          end
+        end
+        else if (~finished) begin
+          NRZI_stream <= out;
+        end
+        else if (SE0_count < 2) begin
+          SE0_count <= SE0_count + 1;
+          sendSE0 <= 1;
+        end
+        else begin
+          idle <= 1;
+          finishedOut <= 1;
+          enable <= 0;
+        end
+      end
+    end
+  end
+endmodule : DataPacket
+
+module DataInPacket (
+  input logic startOut,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  output logic correct,
+  output logic timedout,
+  output logic [63:0] dataOut,
+  USBWires wires
+);
+    logic prevStream, inStream, isSE0, valid;
+    logic [1:0] bus;
+
+    assign bus = {wires.DP, wires.DM};
+
+    always_comb begin
+        inStream = 1'b0;
+        isSE0 = 1'b0;
+        valid = 1'b0;
+        if (~startOut) begin
+            inStream = 1'b0;
+            isSE0 = 1'b0;
+            valid = 1'b0;
+        end else if (bus === BS_SE0) begin
+            isSE0 = 1'b1;
+        end else if (bus === BS_J) begin
+            inStream = 1'b1;
+            valid = 1'b1;
+        end else if (bus === BS_K) begin
+            inStream =1'b0;
+            valid = 1'b1;
+        end
+    end
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        prevStream <= inStream;
+    end
+
+    // NRZI Decoder logic
+    logic NRZI_stream, NRZI_ready, NRZI_out;
+    NRZIDecoder nrzid(.stream(NRZI_stream), .ready(NRZI_ready),
+                      .out(NRZI_out), .clock, .reset_n);
+
+    // Bit Unstuffer logic
+    logic BU_stream, BU_ready, BU_out, BU_hold;
+    BitUnstuffer bu(.stream(BU_stream), .ready(BU_ready), .out(BU_out),
+                    .hold(BU_hold), .clock, .reset_n);
+
+    // BitStreamDecoder logic
+    logic BSD_ready, BSD_done;
+    logic [79:0] BSD_out;
+    BitStreamDecoder #80 bsd(.stream(BU_out), .hold(BU_hold), .ready(BSD_ready),
+                             .finished(BSD_done), .out(BSD_out),
+                             .clock, .reset_n);
+
+    // CRC16Checker logic
+    logic CRCcheck_ready, CRCcheck_done, CRCcheck_correct;
+    CRC16Checker #80 crc16c(.stream(BU_out), .hold(BU_hold),
+                            .ready(CRCcheck_ready), .done(CRCcheck_done),
+                            .correct(CRCcheck_correct), .clock, .reset_n);
+
+    // State control logic
+    logic waiting, readSYNC, readPID, readDATA, readEOP, isDone, isError;
+    logic firstSYNC;
+
+    assign NRZI_ready = firstSYNC | readSYNC | readPID | readDATA;
+    assign BU_ready = readDATA;
+    assign BSD_ready = readDATA;
+    assign CRCcheck_ready = readDATA;
+
+    logic [3:0] SYNCidx, PIDidx, EOPidx;
+    logic [7:0] PIDreceived;
+    assign firstSYNC = waiting && (prevStream == 1'b1 && inStream == 1'b0);
+
+    assign finishedOut = isDone;
+    assign correct = ~isError;
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            waiting <= 1'b1;
+            readSYNC <= 1'b0;
+            readPID <= 1'b0;
+            readDATA <= 1'b0;
+            readEOP <= 1'b0;
+            SYNCidx <= 4'b0;
+            PIDidx <= 4'b0;
+            isDone <= 1'b0;
+            isError <= 1'b0;
+            PIDreceived <= 8'b0;
+        end else begin
+            if (waiting) begin
+                if (startOut & prevStream == 1'b1 && inStream == 1'b0) begin
+                    waiting <= 1'b0;
+                    readSYNC <= 1'b1;
+
+                    SYNCidx <= 4'd1;
+                    NRZI_stream <= inStream;
+                end
+            end else if (readSYNC) begin
+                NRZI_stream <= inStream;
+                SYNCidx <= SYNCidx + 1;
+                if (SYNCidx < 4'd7) begin
+                    if (NRZI_out != 1'b0) begin
+                        isError <= 1'b1;
+                    end
+                end
+                if (SYNCidx == 4'd7) begin
+                    if (NRZI_out != 1'b1) begin
+                        isError <= 1'b1;
+                    end
+                    readSYNC <= 1'b0;
+                    readPID <= 1'b1;
+                    PIDidx <= 4'b0;
+                end
+            end else if (readPID) begin
+                NRZI_stream <= inStream;
+                PIDidx <= PIDidx + 1;
+                PIDreceived[4'd7 - PIDidx] <= NRZI_out;
+                if (PIDidx == 4'd7) begin
+                    if (PIDreceived != 8'b1100_001x || NRZI_out != 1'b1) begin
+                        isError <= 1'b1;
+                    end
+                    readPID <= 1'b0;
+                    readDATA <= 1'b1;
+                end
+            end else if (readDATA) begin
+                NRZI_stream <= inStream;
+                BU_stream <= NRZI_out;
+                if (BSD_done & CRCcheck_done) begin
+                    readDATA <= 1'b0;
+                    readEOP <= 1'b1;
+                    EOPidx <= 4'b0;
+                    if (~CRCcheck_correct) begin
+                        isError <= 1'b1;
+                    end
+                end
+            end else if (readEOP) begin
+                EOPidx <= EOPidx + 4'b1;
+                if (EOPidx <= 4'b1) begin
+                    if (inStream != 1'b0) begin
+                        isError <= 1'b1;
+                    end
+                end else if (EOPidx == 4'd2) begin
+                    if (~isSE0) begin
+                        isError <= 1'b1;
+                    end
+                    readEOP <= 1'b0;
+                    isDone <= 1'b1;
+                end
+            end else if (isDone) begin
+                waiting <= 1'b1;
+            end
+        end
+    end
+
+    // Timeout logic
+    logic [8:0] timeoutCnt;
+    logic is_TO;
+
+    assign is_TO = timeoutCnt == 9'd255;
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            timeoutCnt <= '0;
+        end else begin
+            if (waiting) begin
+                timeoutCnt <= timeoutCnt + 9'b1;
+                if (is_TO) begin
+                    timeoutCnt <= '0;
+                end
+            end else begin
+                timeoutCnt <= '0;
+            end
+        end
+    end
+endmodule : DataInPacket
+
+// TYPE
+// 0: NAK, 1: ACK
+module AckNakPacket #(TYPE = 0) (
+  input logic startOut,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  USBWires wires
+);
+  //tri state wire driving logic
+  logic enable;
+  logic [1:0] bus;
+  logic sendSE0, idle;
+  ///////////////////////////
+
+  //NRZI logic
+  logic NRZI_stream;
+  logic NRZI_ready;
+  logic NRZI_out;
+  ///////////////////////////
+
+  //OTHER PACKET INFO
+  logic [7:0] SYNC_pattern;
+  logic [7:0] PID, PID_reverse;
+  logic [15:0] Pattern;
+  //////////////////////////
+
+  NRZI N (.stream(NRZI_stream),
+          .ready(NRZI_ready),
+          .clock(clock),
+          .reset_n(reset_n),
+          .out(NRZI_out));
+
+  //PID assign
+  assign SYNC_pattern = 8'b0000_0001;
+  assign PID = TYPE ? 8'b1101_0010 : 8'b0101_1010;
+  assign PID_reverse = TYPE ? 8'b0100_1011 : 8'b0101_1010;
+
+  assign Pattern[15:8] = SYNC_pattern;
+  assign Pattern[7:0] = PID_reverse;
+
+  //control variables
+  logic [3:0] SYNC_index;
+  logic SYNC_done;
+
+  logic [3:0] SE0_count;
+  /////////////////////////////
+
+
+  assign {wires.DP, wires.DM} = enable ? bus : BS_NC;
+
+  always_comb begin
+    if (sendSE0) begin
+      bus = BS_SE0;
+    end
+    else begin
+      if (NRZI_out) begin
+        bus = BS_J;
+      end
+      else begin
+        bus = BS_K;
+      end
+    end
+  end
+
+
+  always_ff @(negedge reset_n, posedge clock) begin
+    if (~reset_n) begin
+      enable <= 0;
+      SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+      SYNC_done <= 1'b0;
+      SE0_count <= 4'b0;
+      enable <= 0;
+      finishedOut <= 0;
+      sendSE0 <= 0;
+    end
+    else begin
+      if (startOut) begin
+        NRZI_ready <= 1;
+        if (~SYNC_done) begin
+          enable <= 1;
+          NRZI_stream <= Pattern[SYNC_index];
+          SYNC_index <= SYNC_index - 1;
+          if (SYNC_index == 0) begin
+            SYNC_done <= 1;
+          end
+        end
+        else if (SE0_count < 2) begin
+          SE0_count <= SE0_count + 1;
+          sendSE0 <= 1;
+        end
+        else begin
+          idle <= 1;
+          finishedOut <= 1;
+          enable <= 0;
+        end
+      end
+    end
+  end
+endmodule : AckNakPacket
+
+module AckNakInPacket (
+  input logic startOut,
+  input logic clock, reset_n,
+  output logic finishedOut,
+  output logic isAck,
+  output logic isNak,
+  output logic timedout,
+  USBWires wires
+);
+    logic prevStream, inStream, isSE0, valid;
+    logic [1:0] bus;
+
+    assign bus = {wires.DP, wires.DM};
+
+    always_comb begin
+        inStream = 1'b0;
+        isSE0 = 1'b0;
+        valid = 1'b0;
+        if (~startOut) begin
+            inStream = 1'b0;
+            isSE0 = 1'b0;
+            valid = 1'b0;
+        end else if (bus === BS_SE0) begin
+            isSE0 = 1'b1;
+        end else if (bus === BS_J) begin
+            inStream = 1'b1;
+            valid = 1'b1;
+        end else if (bus === BS_K) begin
+            inStream =1'b0;
+            valid = 1'b1;
+        end
+    end
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        prevStream <= inStream;
+    end
+
+    // NRZI Decoder logic
+    logic NRZI_stream, NRZI_ready, NRZI_out;
+    NRZIDecoder nrzid(.stream(NRZI_stream), .ready(NRZI_ready),
+                      .out(NRZI_out), .clock, .reset_n);
+
+    // State control logic
+    logic waiting, readSYNC, readPID, readEOP, isDone, isError;
+    logic firstSYNC;
+
+    assign NRZI_ready = firstSYNC | readSYNC | readPID;
+
+    logic [3:0] SYNCidx, PIDidx, EOPidx;
+    logic [7:0] PIDreceived;
+    assign firstSYNC = waiting && (prevStream == 1'b1 && inStream == 1'b0);
+
+    assign finishedOut = isDone;
+    assign correct = ~isError;
+    assign isAck = PIDreceived == 8'b1101_0010;
+    assign isNak = PIDreceived == 8'b0101_1010;
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            waiting <= 1'b1;
+            readSYNC <= 1'b0;
+            readPID <= 1'b0;
+            readEOP <= 1'b0;
+            SYNCidx <= 4'b0;
+            PIDidx <= 4'b0;
+            isDone <= 1'b0;
+            isError <= 1'b0;
+            PIDreceived <= 8'b0;
+        end else begin
+            if (waiting) begin
+                if (startOut & prevStream == 1'b1 && inStream == 1'b0) begin
+                    waiting <= 1'b0;
+                    readSYNC <= 1'b1;
+
+                    SYNCidx <= 4'd1;
+                    NRZI_stream <= inStream;
+                end
+            end else if (readSYNC) begin
+                NRZI_stream <= inStream;
+                SYNCidx <= SYNCidx + 1;
+                if (SYNCidx < 4'd7) begin
+                    if (NRZI_out != 1'b0) begin
+                        isError <= 1'b1;
+                    end
+                end
+                if (SYNCidx == 4'd7) begin
+                    if (NRZI_out != 1'b1) begin
+                        isError <= 1'b1;
+                    end
+                    readSYNC <= 1'b0;
+                    readPID <= 1'b1;
+                    PIDidx <= 4'b0;
+                end
+            end else if (readPID) begin
+                NRZI_stream <= inStream;
+                PIDidx <= PIDidx + 1;
+                PIDreceived[4'd7 - PIDidx] <= NRZI_out;
+                if (PIDidx == 4'd7) begin
+                    readPID <= 1'b0;
+                    readEOP <= 1'b1;
+                end
+            end else if (readEOP) begin
+                EOPidx <= EOPidx + 4'b1;
+                if (~isAck & ~isNak) begin
+                    isError <= 1'b1;
+                end
+                 if (EOPidx <= 4'b1) begin
+                    if (inStream != 1'b0) begin
+                        isError <= 1'b1;
+                    end
+                end else if (EOPidx == 4'd2) begin
+                    if (~isSE0) begin
+                        isError <= 1'b1;
+                    end
+                    readEOP <= 1'b0;
+                    isDone <= 1'b1;
+                end
+            end else if (isDone) begin
+                waiting <= 1'b1;
+            end
+        end
+    end
+
+    // Timeout logic
+    logic [8:0] timeoutCnt;
+    logic is_TO;
+
+    assign is_TO = timeoutCnt == 9'd255;
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            timeoutCnt <= '0;
+        end else begin
+            if (waiting) begin
+                timeoutCnt <= timeoutCnt + 9'b1;
+                if (is_TO) begin
+                    timeoutCnt <= '0;
+                end
+            end else begin
+                timeoutCnt <= '0;
+            end
+        end
+    end
+endmodule : AckNakInPacket
 
 module USBHost (
   USBWires wires,
@@ -569,7 +1128,15 @@ module USBHost (
 );
 logic start;
 logic finished;
-InOutPacket #0 DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(finished), .wires(wires));
+logic [63:0] dataSend;
+InOutPacket #0 DUT (.startOut(), .clock(clock), .reset_n(reset_n),
+                    .finishedOut(), .wires(wires));
+DataPacket datap (.clock, .reset_n, .startOut(), .data(dataSend),
+                  .finishedOut(), .wires(wires));
+AckNakPacket #0 ackp (.clock, .reset_n, .startOut(start),
+                   .finishedOut(finished), .wires(wires));
+DataInPacket datainp (.clock, .reset_n, .startOut(), .finishedOut(),
+                      .correct(), .timedout(), .dataOut(), .wires(wires));
 
 // Testing for NRZI
 // logic stream, ready, out, check;
@@ -672,6 +1239,7 @@ InOutPacket #0 DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishe
 
 task prelabRequest();
   start = 1;
+  dataSend = 64'h40aa_11b7_682d_f6d8;
 
   while (!finished) begin
     @(posedge clock);
