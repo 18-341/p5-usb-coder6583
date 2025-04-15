@@ -1122,21 +1122,334 @@ module AckNakInPacket (
     end
 endmodule : AckNakInPacket
 
+
+module ReadWriteFSM (
+    USBWires wires,
+    input logic clock, reset_n,
+    input logic startRead, startWrite,
+    input logic finished, error,
+    input logic [15:0] mempage,
+    input logic [63:0] dataSend,
+
+    output logic in_start, out_start,
+    output logic [63:0] dataOut,
+    output logic read_write_FSM_done,
+    output logic isValueReadCorrect,
+    output logic success,
+    output logic [63:0] dataReceived
+);
+
+    logic waiting, address, buffer, reading, writing, is_done, is_error;
+
+    // Output from the FSM
+    assign read_write_FSM_done = is_done;
+    assign isValueReadCorrect = ~is_error;
+    assign success = ~is_error;
+    assign {wires.DP, wires.DM} = buffer ? BS_SE0 : BS_NC;
+
+    always_comb begin
+        in_start = 1'b0; out_start = 1'b0;
+        dataOut = 64'd0;
+        if (address) begin
+            out_start = 1'b1;
+            dataOut = {48'b0, mempage};
+            // in_start or out_start should be 1'b1
+        end else if (waiting) begin
+            if (startRead | startWrite) begin
+                out_start = 1'b1;
+                dataOut = {48'b0, mempage};
+            end
+        end else if (writing) begin
+            out_start = 1'b1;
+            dataOut = dataSend;
+        end else if (reading) begin
+            in_start = 1'b1;
+        end
+    end
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            waiting <= 1'b1;
+            address <= 1'b0;
+            buffer <= 1'b0;
+            reading <= 1'b0;
+            writing <= 1'b0;
+            is_done <= 1'b0;
+            is_error <= 1'b0;
+        end else begin
+            // READING
+            if (reading) begin
+                if (finished) begin
+                    reading <= 1'b0;
+                    is_done <= 1'b1;
+                    is_error <= error;
+                end
+            end
+            // WRITING
+            else if (writing) begin
+                if (finished) begin
+                    writing <= 1'b0;
+                    is_done <= 1'b1;
+                    is_error <= error;
+                end
+            end
+            // DONE and ERROR
+            else if (is_done) begin
+                is_done <= 1'b0;
+                is_error <= 1'b1;
+            end
+            // ADDRESS
+            else if (address & finished) begin
+                address <= 1'b0;
+                if (startRead) begin
+                    reading <= 1'b1;
+                end else if (startWrite) begin
+                    writing <= 1'b1;
+                end
+            end
+            // BUFFER
+            else if (buffer) begin
+                if (startRead) begin
+                    buffer <= 1'b0;
+                    reading <= 1'b1;
+                end else if (startWrite) begin
+                    buffer <= 1'b0;
+                    writing <= 1'b1;
+                end
+            end
+            // WAITING
+            else if (waiting) begin
+                if (startRead | startWrite) begin
+                    waiting <= 1'b0;
+                    address <= 1'b1;
+                    is_error <= 1'b0;
+                end
+            end
+        end
+    end
+endmodule : ReadWriteFSM
+
+
+
+module ProtocolHandler (
+    USBWires wires,
+    input logic clock, reset_n,
+    input logic in_start, out_start,
+    input logic finishedIn, finishedOut,
+    input logic finishedAck, finishedNack,
+    input logic finishedAckIn, finishedNackIn,
+    input logic finishedData, finishedDataIn,
+    input logic errorDataIn,
+
+    output logic startOut, startIn,
+    output logic startAck, startNack,
+    output logic startAckIn, startNackIn,
+    output logic startData, startDataIn,
+    output logic finished, error
+);
+
+    logic [3:0] retries;
+
+    enum logic [3:0] {WAIT, SEND_IN, SEND_OUT, REC_DATA0,
+                      SEND_DATA0, SEND_ACK, SEND_NAK,
+                      REC_ACK, DONE, ERROR} currState, nextState;
+
+    assign startIn = (currState == SEND_IN) & ~finishedIn;
+    assign startDataIn = (currState == REC_DATA0) & ~finishedDataIn;
+    assign startAck = (currState == SEND_ACK) & ~finishedAck;
+    assign startNack = (currState == SEND_NAK) & ~finishedNack;
+    assign startOut = (currState == SEND_OUT) & ~finishedOut;
+    assign startData = (currState == SEND_DATA0) & ~finishedData;
+    assign startAckIn = (currState == REC_ACK) & ~(finishedAckIn | finishedNackIn);
+    assign startNackIn = (currState == REC_ACK) & ~(finishedNackIn | finishedAckIn);
+
+    // State Transitions
+    always_comb begin
+        nextState = currState;
+        case (currState)
+            WAIT: begin
+                if (in_start) begin
+                    nextState = SEND_IN;
+                end else if (out_start) begin
+                    nextState = SEND_OUT;
+                end
+            end
+            SEND_IN: begin
+                if (finishedIn) begin
+                    nextState = REC_DATA0;
+                end
+            end
+            REC_DATA0: begin
+                if (finishedDataIn) begin
+                    if (errorDataIn) begin
+                        nextState = SEND_NAK;
+                    end else begin
+                        nextState = SEND_ACK;
+                    end
+                end
+            end
+            SEND_ACK: begin
+                if (finishedAck) begin
+                    nextState = DONE;
+                end
+            end
+            SEND_NAK: begin
+                if (finishedNack) begin
+                    if(retries < 8) begin
+                        nextState = REC_DATA0;
+                    end else begin
+                        nextState = ERROR;
+                    end
+                end
+            end
+            SEND_OUT: begin
+                if (finishedOut) begin
+                    nextState = SEND_DATA0;
+                end
+            end
+            SEND_DATA0: begin
+                if (finishedData) begin
+                    nextState = REC_ACK;
+                end
+            end
+            REC_ACK: begin
+                if (finishedNackIn) begin
+                    if (retries < 8) begin
+                        nextState = SEND_DATA0;
+                    end else begin
+                        nextState = ERROR;
+                    end
+                end else if (finishedAckIn) begin
+                    nextState = DONE;
+                end
+            end
+            DONE: begin
+                nextState = WAIT;
+            end
+            ERROR: begin
+                nextState = WAIT;
+            end
+        endcase
+    end
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            currState <= WAIT;
+        end else begin
+            currState <= nextState;
+            if (currState == SEND_NAK) begin
+                if (nextState == REC_DATA0)
+                    retries += 4'd1;
+                else if (nextState == ERROR)
+                    retries = 4'd0;
+            end else if (currState == REC_ACK) begin
+                if (nextState == SEND_DATA0)
+                    retries += 4'd1;
+                else if (nextState == ERROR || nextState == DONE)
+                    retries = 4'd0;
+            end else if (currState == REC_DATA0 && nextState == SEND_ACK) begin
+                retries = 4'd0;
+            end
+        end
+    end
+endmodule : ProtocolHandler
+
+
 module USBHost (
   USBWires wires,
   input logic clock, reset_n
 );
-logic start;
-logic finished;
-logic [63:0] dataSend;
-InOutPacket #0 DUT (.startOut(), .clock(clock), .reset_n(reset_n),
-                    .finishedOut(), .wires(wires));
-DataPacket datap (.clock, .reset_n, .startOut(), .data(dataSend),
-                  .finishedOut(), .wires(wires));
-AckNakPacket #0 ackp (.clock, .reset_n, .startOut(start),
-                   .finishedOut(finished), .wires(wires));
-DataInPacket datainp (.clock, .reset_n, .startOut(), .finishedOut(),
-                      .correct(), .timedout(), .dataOut(), .wires(wires));
+logic startOut, startIn, startDataIn, startAck, startNack, startAckIn, startNackIn;
+logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn, finishedNackIn;
+
+logic startData, finishedData;
+logic [15:0] mempageAt;
+logic [63:0] dataSend, dataDetected, dataOut, dataReceived;
+
+InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n),
+                      .finishedOut(finishedOut), .wires(wires));
+InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n),
+                      .finishedOut(finishedIn), .wires(wires));
+AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n),
+                        .finishedOut(finishedAck), .wires(wires));
+AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock),
+                         .reset_n(reset_n),
+                         .finishedOut(finishedNack), .wires(wires));
+DataPacket Test (.startOut(startData), .data(dataSend), .clock(clock),
+                 .reset_n(reset_n),
+                 .finishedOut(finishedData), .wires(wires));
+DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock),
+                    .reset_n(reset_n), .finished(finishedDataIn),
+                    .data(dataDetected));
+
+AckNackInPacket #(0) ACKTest (.wires(wires), .start(startAckIn), .clock(clock),
+                              .reset_n(reset_n), .finished(finishedAckIn));
+AckNackInPacket #(1) ACKTest1 (.wires(wires), .start(startNackIn), .clock(clock),
+                              .reset_n(reset_n), .finished(finishedNackIn));
+
+logic startRead, startWrite, proHandFinished, proHandError;
+logic in_start, out_start;
+logic read_write_FSM_done, isValueReadCorrect, writeSuccess;
+ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startRead, .startWrite,
+                    .finished(proHandFinished), .error(proHandError),
+                    .in_start, .out_start,
+                    .mempage(mempageAt), .dataSend, .dataOut, .dataReceived,
+                    .read_write_FSM_done, .isValueReadCorrect,
+                    .success(writeSuccess));
+ProtocolHandler proHand(.wires, .clock, .reset_n, .in_start, .out_start,
+                        .finishedIn, .finishedOut, .finishedAck, .finishedNack,
+                        .finishedAckIn, .finishedNackIn,
+                        // TODO: errorDataIn
+                        .finishedData, .finishedDataIn, .errorDataIn(1'b0),
+                        .startOut, .startIn, .startAck, .startNack,
+                        .startAckIn, .startNackIn, .startData,
+                        .startDataIn, .finished(proHandFinished),
+                        .error(proHandError));
+
+task prelabRequest();
+  start = 1;
+  dataSend = 64'h40aa_11b7_682d_f6d8;
+
+  while (!finished) begin
+    @(posedge clock);
+  end
+endtask : prelabRequest
+
+task readData
+// Host sends mempage to thumb drive using a READ (OUT->DATA0->IN->DATA0)
+// transaction, and then receives data from it. This task should return both the
+// data and the transaction status, successful or unsuccessful, to the caller.
+( input logic [15:0] mempage, // Page to write
+  output logic [63:0] data, // Vector of bytes to write
+  output logic success);
+
+    mempageAt <= mempage;
+    startRead <= 1'b1;
+
+    wait (read_write_FSM_done);
+
+    startRead <= 1'b0;
+    data <= dataReceived;
+    success <= isValueReadCorrect;
+endtask : readData
+
+task writeData
+// Host sends mempage to thumb drive using a WRITE (OUT->DATA0->OUT->DATA0)
+// transaction, and then sends data to it. This task should return the
+// transaction status, successful or unsuccessful, to the caller.
+( input logic [15:0] mempage, // Page to write
+  input logic [63:0] data, // Vector of bytes to write
+  output logic success);
+
+    mempageAt <= mempage;
+    dataSend <= data;
+    startWrite <= 1'b1;
+
+    wait (read_write_FSM_done);
+
+    startWrite <= 1'b0;
+    success <= writeSuccess;
+endtask : writeData
 
 // Testing for NRZI
 // logic stream, ready, out, check;
@@ -1236,41 +1549,7 @@ DataInPacket datainp (.clock, .reset_n, .startOut(), .finishedOut(),
 //     assert(done) else $error("done not asserted");
 //     assert(correct) else $error("correct not asserted: %x", crc16);
 // endtask: testCRC16Checker
-
-task prelabRequest();
-  start = 1;
-  dataSend = 64'h40aa_11b7_682d_f6d8;
-
-  while (!finished) begin
-    @(posedge clock);
-  end
-endtask : prelabRequest
-
-task readData
-// Host sends mempage to thumb drive using a READ (OUT->DATA0->IN->DATA0)
-// transaction, and then receives data from it. This task should return both the
-// data and the transaction status, successful or unsuccessful, to the caller.
-( input logic [15:0] mempage, // Page to write
-  output logic [63:0] data, // Vector of bytes to write
-  output logic success);
-
-  data = 64'h0;
-  success = 1'b0;
-
-endtask : readData
-
-task writeData
-// Host sends mempage to thumb drive using a WRITE (OUT->DATA0->OUT->DATA0)
-// transaction, and then sends data to it. This task should return the
-// transaction status, successful or unsuccessful, to the caller.
-( input logic [15:0] mempage, // Page to write
-  input logic [63:0] data, // Vector of bytes to write
-  output logic success);
-
-  success = 1'b0;
-
-endtask : writeData
-
+  
 endmodule : USBHost
 
 
