@@ -289,6 +289,131 @@ module CRC5Checker #(WIDTH = 11) (
     end
 endmodule : CRC5Checker
 
+module CRC16 #(WIDTH = 64) (
+    input logic clock, reset_n,
+    input logic [WIDTH-1:0] parallelIn,
+    input logic ready,
+    output logic done,
+    output logic [15:0] out
+);
+    logic [$clog2(WIDTH)-1:0] idx;
+    logic calc, is_done;
+    logic idxEnd;
+
+    assign idxEnd = idx == 0;
+    assign done = is_done;
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            out <= 16'hffff;
+            idx <= WIDTH - 1;
+            calc <= 1'b0;
+            is_done <= 1'b0;
+        end else begin
+            if (calc) begin
+                out[0] <= out[15] ^ parallelIn[idx];
+                out[1] <= out[0];
+                out[2] <= (out[15] ^ parallelIn[idx]) ^ out[1];
+                out[3] <= out[2];
+                out[4] <= out[3];
+                out[5] <= out[4];
+                out[6] <= out[5];
+                out[7] <= out[6];
+                out[8] <= out[7];
+                out[9] <= out[8];
+                out[10] <= out[9];
+                out[11] <= out[10];
+                out[12] <= out[11];
+                out[13] <= out[12];
+                out[14] <= out[13];
+                out[15] <= (out[15] ^ parallelIn[idx]) ^ out[14];
+                if (idxEnd) begin
+                    idx <= '0;
+                    calc <= 1'b0;
+                    is_done <= 1'b1;
+                end else begin
+                    idx <= idx - 1;
+                end
+            end else if (is_done) begin
+                is_done <= 1'b0;
+                if (ready) begin
+                    calc <= 1'b1;
+                    out <= 16'hffff;
+                    idx <= WIDTH - 1;
+                end
+            end else begin
+                if (ready) begin
+                    calc <= 1'b1;
+                    idx <= WIDTH - 1;
+                    out <= 16'hffff;
+                end
+            end
+        end
+    end
+endmodule : CRC16
+
+module CRC16Checker #(WIDTH = 64) (
+    input logic clock, reset_n,
+    input logic stream,
+    input logic ready,
+    output logic done, correct
+);
+    logic [15:0] ffs;
+    logic [$clog2(WIDTH):0] cnt;
+    logic calc, is_done;
+
+    logic cycleDone;
+    assign cycleDone = cnt == WIDTH;
+    assign done = is_done;
+    assign correct = done & (ffs == 16'h800D);
+
+    always_ff @(posedge clock, negedge reset_n) begin
+        if (~reset_n) begin
+            cnt <= '0;
+            ffs <= 16'hFFFF;
+            calc <= 1'b0;
+            is_done <= 1'b0;
+        end else begin
+            if (calc & ~cycleDone) begin
+                ffs[0] <= ffs[15] ^ stream;
+                ffs[1] <= ffs[0];
+                ffs[2] <= (ffs[15] ^ stream) ^ ffs[1];
+                ffs[3] <= ffs[2];
+                ffs[4] <= ffs[3];
+                ffs[5] <= ffs[4];
+                ffs[6] <= ffs[5];
+                ffs[7] <= ffs[6];
+                ffs[8] <= ffs[7];
+                ffs[9] <= ffs[8];
+                ffs[10] <= ffs[9];
+                ffs[11] <= ffs[10];
+                ffs[12] <= ffs[11];
+                ffs[13] <= ffs[12];
+                ffs[14] <= ffs[13];
+                ffs[15] <= (ffs[15] ^ stream) ^ ffs[14];
+            end
+            if (calc) begin
+                if (~cycleDone) begin
+                    cnt <= cnt + 1;
+                end else begin
+                    cnt <= '0;
+                    calc <= 1'b0;
+                    is_done <= 1'b1;
+                end
+            end else if (is_done) begin
+                is_done <= 1'b0;
+                if (ready) begin
+                    calc <= 1'b1;
+                end
+            end else begin
+                if (ready) begin
+                    calc <= 1'b1;
+                end
+            end
+        end
+    end
+endmodule : CRC16Checker
+
 module Reverse
 #(WIDTH = 7)
 (input logic [WIDTH-1:0] in,
@@ -530,6 +655,36 @@ OutPacket DUT (.startOut(start), .clock(clock), .reset_n(reset_n), .finishedOut(
 //     assert(done) else $error("done not asserted");
 //     assert(correct) else $error("correct not asserted: %b", crc5);
 // endtask: testCRC5Checker
+
+// Testing for CRC16 checker
+logic stream, ready, done, correct, crc16done, crc16ready;
+logic [63:0] parallelIn;
+logic [15:0] crc16;
+CRC16 crc(.parallelIn, .ready(crc16ready), .done(crc16done), .out(crc16),
+         .clock, .reset_n);
+CRC16Checker #80 crccheck(.clock, .reset_n, .stream, .ready, .done,
+                         .correct);
+
+task testCRC16Checker();
+    crc16ready <= 1'b1;
+    parallelIn <= 64'hF809_4389_0991_2021;
+    while(!crc16done)
+        @(posedge clock);
+    ready <= 1'b1;
+    @(posedge clock);
+    for (int i = 63; i >= 0; i=i-1) begin
+        stream <= parallelIn[i];
+        @(posedge clock);
+    end
+    for (int i = 15; i >= 0; i=i-1) begin
+        stream <= ~crc16[i];
+        @(posedge clock);
+    end
+    @(posedge clock);
+    @(posedge clock);
+    assert(done) else $error("done not asserted");
+    assert(correct) else $error("correct not asserted: %b", crc16);
+endtask: testCRC16Checker
 
 task prelabRequest();
   start = 0;
