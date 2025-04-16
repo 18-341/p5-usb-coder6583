@@ -209,6 +209,7 @@ module CRC5
   input logic ready,
   input logic clock,
   input logic reset_n,
+  output logic done,
   output logic [4:0] out
 );
   logic [$clog2(WIDTH)-1:0] index;
@@ -513,7 +514,7 @@ module InOutPacket #(TYPE = 0) (
       end
     end
   end
-  
+
   always_ff @(negedge reset_n, posedge clock) begin
     if (~reset_n) begin
       enable <= 0;
@@ -797,7 +798,9 @@ module DataInPacket (
     logic [7:0] PIDreceived;
     assign firstSYNC = waiting && (prevStream == 1'b1 && inStream == 1'b0);
 
-    assign finishedOut = isDone;
+    logic isTO;
+
+    assign finishedOut = isDone | isTO;
     assign correct = ~isError;
 
     always_ff @(posedge clock, negedge reset_n) begin
@@ -885,17 +888,17 @@ module DataInPacket (
 
     // Timeout logic
     logic [8:0] timeoutCnt;
-    logic is_TO;
 
-    assign is_TO = timeoutCnt == 9'd255;
+    assign isTO = timeoutCnt == 9'd255;
+    assign timedout = isTO;
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             timeoutCnt <= '0;
         end else begin
-            if (waiting) begin
+            if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
-                if (is_TO) begin
+                if (isTO) begin
                     timeoutCnt <= '0;
                 end
             end else begin
@@ -1012,17 +1015,6 @@ module AckNakPacket #(TYPE = 0) (
         NRZI_ready <= 1'b0;
       end
     end
-    if (!start) begin
-      SYNC_count <= 0;
-      readingSync <= 1;
-      NRZI_ready <= 0;
-      PID_count <= 0;
-      readingPID <= 0;
-      readingEOP <= 1;
-      SE0_count <= 0;
-      incorrect <= 0;
-      finished <= 0;
-    end
   end
 endmodule : AckNakPacket
 
@@ -1078,7 +1070,9 @@ module AckNakInPacket (
     logic [7:0] PIDreceived;
     assign firstSYNC = waiting && (prevStream == 1'b1 && inStream == 1'b0);
 
-    assign finishedOut = isDone;
+    logic isTO;
+
+    assign finishedOut = isDone | timedout;
     assign isAck = PIDreceived == 8'b0100_1011;
     assign isNak = PIDreceived == 8'b0101_1010;
 
@@ -1134,6 +1128,12 @@ module AckNakInPacket (
                 // When done processing PID
                 if (PIDidx == 4'd7) begin
                     readPID <= 1'b0;
+                    readEOP <= 1'b1;
+                end
+            end else if (readEOP) begin
+                EOPidx <= EOPidx + 1;
+                if (EOPidx == 4'd2) begin
+                    readEOP <= 1'b0;
                     isDone <= 1'b1;
                 end
             end else if (isDone) begin
@@ -1153,17 +1153,18 @@ module AckNakInPacket (
 
     // Timeout logic
     logic [8:0] timeoutCnt;
-    logic is_TO;
 
-    assign is_TO = timeoutCnt == 9'd255;
+    assign isTO = timeoutCnt == 9'd255;
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             timeoutCnt <= '0;
+            timedout <= 1'b0;
         end else begin
-            if (waiting) begin
+            if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
-                if (is_TO) begin
+                if (isTO) begin
+                    timedout <= 1'b1;
                     timeoutCnt <= '0;
                 end
             end else begin
@@ -1297,6 +1298,7 @@ module ProtocolHandler (
     input logic finishedAckIn, finishedNackIn,
     input logic finishedData, finishedDataIn,
     input logic errorDataIn,
+    input logic dataTimeout, ackTimeout,
 
     output logic startOut, startIn,
     output logic startAck, startNack,
@@ -1305,7 +1307,7 @@ module ProtocolHandler (
     output logic finished, error
 );
 
-    logic [3:0] retries;
+    logic [3:0] retries, timeouts;
 
     enum logic [3:0] {WAIT, SEND_IN, SEND_OUT, REC_DATA0,
                       SEND_DATA0, SEND_ACK, SEND_NAK,
@@ -1340,7 +1342,7 @@ module ProtocolHandler (
             end
             REC_DATA0: begin
                 if (finishedDataIn) begin
-                    if (errorDataIn) begin
+                    if (errorDataIn | dataTimeout) begin
                         nextState = SEND_NAK;
                     end else begin
                         nextState = SEND_ACK;
@@ -1354,7 +1356,7 @@ module ProtocolHandler (
             end
             SEND_NAK: begin
                 if (finishedNack) begin
-                    if(retries < 8) begin
+                    if(retries < 8 && timeouts < 8) begin
                         nextState = REC_DATA0;
                     end else begin
                         nextState = ERROR;
@@ -1372,8 +1374,8 @@ module ProtocolHandler (
                 end
             end
             REC_ACK: begin
-                if (finishedNackIn) begin
-                    if (retries < 8) begin
+                if (finishedNackIn | ackTimeout) begin
+                    if (retries < 8 && timeouts < 8) begin
                         nextState = SEND_DATA0;
                     end else begin
                         nextState = ERROR;
@@ -1394,20 +1396,37 @@ module ProtocolHandler (
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             currState <= WAIT;
+            retries <= 4'd0;
+            timeouts <= 4'd0;
         end else begin
             currState <= nextState;
-            if (currState == SEND_NAK) begin
-                if (nextState == REC_DATA0)
-                    retries += 4'd1;
-                else if (nextState == ERROR)
-                    retries = 4'd0;
+            if (currState == REC_DATA0) begin
+                if (finishedDataIn & errorDataIn & retries < 8)
+                    retries <= retries + 4'd1;
+                else if (finishedDataIn & dataTimeout & timeouts < 8)
+                    timeouts <= timeouts + 4'd1;
+                else if (retries == 8) begin
+                    retries <= 4'd0;
+                    timeouts <= 4'd0;
+                end else if (timeouts == 8) begin
+                    timeouts <= 4'd0;
+                    retries <= 4'd0;
+                end
             end else if (currState == REC_ACK) begin
-                if (nextState == SEND_DATA0)
-                    retries += 4'd1;
-                else if (nextState == ERROR || nextState == DONE)
-                    retries = 4'd0;
-            end else if (currState == REC_DATA0 && nextState == SEND_ACK) begin
-                retries = 4'd0;
+                if (finishedNackIn & retries < 8)
+                    retries <= retries + 4'd1;
+                else if (ackTimeout & timeouts < 8)
+                    timeouts <= timeouts + 4'd1;
+                else if (retries == 8) begin
+                    retries <= 4'd0;
+                    timeouts <= 4'd0;
+                end else if (timeouts == 8) begin
+                    retries <= 4'd0;
+                    timeouts <= 4'd0;
+                end
+            end else if (currState == DONE || currState == ERROR) begin
+                retries <= 4'd0;
+                timeouts <= 4'd0;
             end
         end
     end
@@ -1465,7 +1484,7 @@ ProtocolHandler proHand(.wires, .clock, .reset_n, .in_start, .out_start,
                         .startOut, .startIn, .startAck, .startNack,
                         .startAckIn, .startNackIn, .startData,
                         .startDataIn, .finished(proHandFinished),
-                        .error(proHandError));
+                        .error(proHandError), .ackTimeout, .dataTimeout);
 
 task prelabRequest();
 //   start = 1;
