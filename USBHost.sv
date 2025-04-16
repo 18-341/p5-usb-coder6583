@@ -209,7 +209,6 @@ module CRC5
   input logic ready,
   input logic clock,
   input logic reset_n,
-  output logic done,
   output logic [4:0] out
 );
   logic [$clog2(WIDTH)-1:0] index;
@@ -240,6 +239,11 @@ module CRC5
         stillGoing <= 0;
         done <= 1'b1;
       end
+    end
+    if (!ready) begin
+      out <= 5'b1_1111;
+      index <= WIDTH-1;
+      stillGoing <= 1;
     end
   end
 endmodule : CRC5
@@ -509,8 +513,7 @@ module InOutPacket #(TYPE = 0) (
       end
     end
   end
-
-
+  
   always_ff @(negedge reset_n, posedge clock) begin
     if (~reset_n) begin
       enable <= 0;
@@ -1008,6 +1011,17 @@ module AckNakPacket #(TYPE = 0) (
         sendSE0 <= 0;
         NRZI_ready <= 1'b0;
       end
+    end
+    if (!start) begin
+      SYNC_count <= 0;
+      readingSync <= 1;
+      NRZI_ready <= 0;
+      PID_count <= 0;
+      readingPID <= 0;
+      readingEOP <= 1;
+      SE0_count <= 0;
+      incorrect <= 0;
+      finished <= 0;
     end
   end
 endmodule : AckNakPacket
