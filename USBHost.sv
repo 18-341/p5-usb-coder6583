@@ -166,7 +166,7 @@ module BitStreamDecoder #(WIDTH = 32)
     logic [$clog2(WIDTH):0] idx;
     logic collecting, idxEnd;
 
-    assign idxEnd = idx == WIDTH - 1;
+    assign idxEnd = idx == WIDTH;
     assign finished = idxEnd;
 
     always_ff @(posedge clock, negedge reset_n) begin
@@ -222,6 +222,12 @@ module CRC5
       done <= 1'b0;
     end
     else begin
+      if (~ready) begin
+        out <= 5'b1_1111;
+        index <= WIDTH-1;
+        stillGoing <= 1;
+        done <= 1'b0;
+      end
       if (ready & stillGoing) begin
         out[0] <= out[4] ^ parallelIn[index];
         out[1] <= out[0];
@@ -346,21 +352,18 @@ module CRC16Checker #(WIDTH = 64) (
 );
     logic [15:0] ffs;
     logic [$clog2(WIDTH):0] cnt;
-    logic calc, is_done;
 
     logic cycleDone;
     assign cycleDone = cnt == WIDTH;
-    assign done = is_done;
+    assign done = cycleDone;
     assign correct = done & (ffs == 16'h800D);
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             cnt <= '0;
             ffs <= 16'hFFFF;
-            calc <= 1'b0;
-            is_done <= 1'b0;
         end else begin
-            if (calc & ~cycleDone & ~hold) begin
+            if (ready & ~hold & ~cycleDone) begin
                 ffs[0] <= ffs[15] ^ stream;
                 ffs[1] <= ffs[0];
                 ffs[2] <= (ffs[15] ^ stream) ^ ffs[1];
@@ -377,24 +380,10 @@ module CRC16Checker #(WIDTH = 64) (
                 ffs[13] <= ffs[12];
                 ffs[14] <= ffs[13];
                 ffs[15] <= (ffs[15] ^ stream) ^ ffs[14];
-            end
-            if (calc) begin
-                if (~cycleDone & ~hold) begin
-                    cnt <= cnt + 1;
-                end else if (cycleDone) begin
-                    cnt <= '0;
-                    calc <= 1'b0;
-                    is_done <= 1'b1;
-                end
-            end else if (is_done) begin
-                is_done <= 1'b0;
-                if (ready) begin
-                    calc <= 1'b1;
-                end
-            end else begin
-                if (ready) begin
-                    calc <= 1'b1;
-                end
+                cnt <= cnt + 1;
+            end else if (~ready) begin
+                cnt <= '0;
+                ffs <= 16'hFFFF;
             end
         end
     end
@@ -415,6 +404,7 @@ endmodule : Reverse
 // TYPE: 0 is IN, 1 is OUT
 module InOutPacket #(TYPE = 0) (
   input logic startOut,
+  input logic isAddr,
   input logic clock, reset_n,
   output logic finishedOut,
   USBWires wires
@@ -488,7 +478,7 @@ module InOutPacket #(TYPE = 0) (
 
 
   assign address = `DEVICE_ADDR;
-  assign endpoint = 4'd4;
+  assign endpoint = isAddr ? 4'd4 : 4'd8;
 
   // assign parallelIn[7:0] = PID;
 
@@ -530,6 +520,9 @@ module InOutPacket #(TYPE = 0) (
       enable <= 0;
       finishedOut <= 0;
       sendSE0 <= 0;
+      CRC_ready <= 1'b0;
+      NRZI_ready <= 1'b0;
+      ready <= 1'b0;
     end
     else begin
       if (startOut) begin
@@ -558,6 +551,17 @@ module InOutPacket #(TYPE = 0) (
           finishedOut <= 1;
           enable <= 0;
         end
+      end else begin
+        enable <= 0;
+        SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+        SYNC_done <= 1'b0;
+        SE0_count <= 4'b0;
+        enable <= 0;
+        finishedOut <= 0;
+        sendSE0 <= 0;
+        CRC_ready <= 1'b0;
+        NRZI_ready <= 1'b0;
+        ready <= 1'b0;
       end
     end
   end
@@ -668,6 +672,9 @@ module DataPacket (
       enable <= 0;
       finishedOut <= 0;
       sendSE0 <= 0;
+      CRC_ready <= 1'b0;
+      NRZI_ready <= 1'b0;
+      ready <= 1'b0;
     end
     else begin
       if (startOut) begin
@@ -696,6 +703,17 @@ module DataPacket (
           finishedOut <= 1;
           enable <= 0;
         end
+      end else begin
+        enable <= 0;
+        SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+        SYNC_done <= 1'b0;
+        SE0_count <= 4'b0;
+        enable <= 0;
+        finishedOut <= 0;
+        sendSE0 <= 0;
+        CRC_ready <= 1'b0;
+        NRZI_ready <= 1'b0;
+        ready <= 1'b0;
       end
     end
   end
@@ -765,10 +783,12 @@ module DataInPacket (
     logic waiting, readSYNC, readPID, readDATA, readEOP, isDone, isError;
     logic firstSYNC;
 
-    assign NRZI_ready = firstSYNC | readSYNC | readPID | readDATA;
-    assign BU_ready = readDATA;
-    assign BSD_ready = readDATA;
-    assign CRCcheck_ready = readDATA;
+    always_ff @(posedge clock, negedge reset_n) begin
+        NRZI_ready <= firstSYNC | readSYNC | readPID | readDATA;
+        BU_ready <= readDATA;
+        BSD_ready <= readDATA;
+        CRCcheck_ready <= readDATA;
+    end
 
     logic [3:0] SYNCidx, PIDidx, EOPidx;
     logic [7:0] PIDreceived;
@@ -789,13 +809,14 @@ module DataInPacket (
             isDone <= 1'b0;
             isError <= 1'b0;
             PIDreceived <= 8'b0;
+            dataOut <= '0;
         end else begin
             if (waiting) begin
                 if (startOut & prevStream == 1'b1 && inStream == 1'b0) begin
                     waiting <= 1'b0;
                     readSYNC <= 1'b1;
 
-                    SYNCidx <= 4'd1;
+                    SYNCidx <= 4'd0;
                     NRZI_stream <= inStream;
                 end
             end else if (readSYNC) begin
@@ -834,23 +855,27 @@ module DataInPacket (
                     EOPidx <= 4'b0;
                     if (~CRCcheck_correct) begin
                         isError <= 1'b1;
+                    end else begin
+                        dataOut <= BSD_out[63:0];
                     end
                 end
             end else if (readEOP) begin
                 EOPidx <= EOPidx + 4'b1;
-                if (EOPidx <= 4'b1) begin
-                    if (inStream != 1'b0) begin
-                        isError <= 1'b1;
-                    end
-                end else if (EOPidx == 4'd2) begin
-                    if (~isSE0) begin
-                        isError <= 1'b1;
-                    end
+                if (EOPidx == 4'd2) begin
                     readEOP <= 1'b0;
                     isDone <= 1'b1;
                 end
             end else if (isDone) begin
                 waiting <= 1'b1;
+                readSYNC <= 1'b0;
+                readPID <= 1'b0;
+                readDATA <= 1'b0;
+                readEOP <= 1'b0;
+                SYNCidx <= 4'b0;
+                PIDidx <= 4'b0;
+                isDone <= 1'b0;
+                isError <= 1'b0;
+                PIDreceived <= 8'b0;
             end
         end
     end
@@ -951,6 +976,7 @@ module AckNakPacket #(TYPE = 0) (
       enable <= 0;
       finishedOut <= 0;
       sendSE0 <= 0;
+      NRZI_ready <= 1'b0;
     end
     else begin
       if (startOut) begin
@@ -972,6 +998,15 @@ module AckNakPacket #(TYPE = 0) (
           finishedOut <= 1;
           enable <= 0;
         end
+      end else begin
+        enable <= 0;
+        SYNC_index <= 4'd15; //start out by sending the SYNC at MSB
+        SYNC_done <= 1'b0;
+        SE0_count <= 4'b0;
+        enable <= 0;
+        finishedOut <= 0;
+        sendSE0 <= 0;
+        NRZI_ready <= 1'b0;
       end
     end
   end
@@ -1030,8 +1065,7 @@ module AckNakInPacket (
     assign firstSYNC = waiting && (prevStream == 1'b1 && inStream == 1'b0);
 
     assign finishedOut = isDone;
-    assign correct = ~isError;
-    assign isAck = PIDreceived == 8'b1101_0010;
+    assign isAck = PIDreceived == 8'b0100_1011;
     assign isNak = PIDreceived == 8'b0101_1010;
 
     always_ff @(posedge clock, negedge reset_n) begin
@@ -1042,6 +1076,7 @@ module AckNakInPacket (
             readEOP <= 1'b0;
             SYNCidx <= 4'b0;
             PIDidx <= 4'b0;
+            EOPidx <= 4'b0;
             isDone <= 1'b0;
             isError <= 1'b0;
             PIDreceived <= 8'b0;
@@ -1051,7 +1086,7 @@ module AckNakInPacket (
                     waiting <= 1'b0;
                     readSYNC <= 1'b1;
 
-                    SYNCidx <= 4'd1;
+                    SYNCidx <= 4'd0;
                     NRZI_stream <= inStream;
                 end
             end else if (readSYNC) begin
@@ -1074,28 +1109,30 @@ module AckNakInPacket (
                 NRZI_stream <= inStream;
                 PIDidx <= PIDidx + 1;
                 PIDreceived[4'd7 - PIDidx] <= NRZI_out;
-                if (PIDidx == 4'd7) begin
-                    readPID <= 1'b0;
-                    readEOP <= 1'b1;
-                end
-            end else if (readEOP) begin
-                EOPidx <= EOPidx + 4'b1;
-                if (~isAck & ~isNak) begin
+                // Checking EOP
+                if (PIDidx == 4'd5 && inStream != 1'b0) begin
+                    isError <= 1'b1;
+                end else if (PIDidx == 4'd6 && inStream != 1'b0) begin
+                    isError <= 1'b1;
+                end else if (PIDidx == 4'd7 && ~isSE0) begin
                     isError <= 1'b1;
                 end
-                 if (EOPidx <= 4'b1) begin
-                    if (inStream != 1'b0) begin
-                        isError <= 1'b1;
-                    end
-                end else if (EOPidx == 4'd2) begin
-                    if (~isSE0) begin
-                        isError <= 1'b1;
-                    end
-                    readEOP <= 1'b0;
+                // When done processing PID
+                if (PIDidx == 4'd7) begin
+                    readPID <= 1'b0;
                     isDone <= 1'b1;
                 end
             end else if (isDone) begin
                 waiting <= 1'b1;
+                readSYNC <= 1'b0;
+                readPID <= 1'b0;
+                readEOP <= 1'b0;
+                SYNCidx <= 4'b0;
+                PIDidx <= 4'b0;
+                EOPidx <= 4'b0;
+                isDone <= 1'b0;
+                isError <= 1'b0;
+                PIDreceived <= 8'b0;
             end
         end
     end
@@ -1136,7 +1173,7 @@ module ReadWriteFSM (
     output logic read_write_FSM_done,
     output logic isValueReadCorrect,
     output logic success,
-    output logic [63:0] dataReceived
+    output logic isAddr
 );
 
     logic waiting, address, buffer, reading, writing, is_done, is_error;
@@ -1144,20 +1181,21 @@ module ReadWriteFSM (
     // Output from the FSM
     assign read_write_FSM_done = is_done;
     assign isValueReadCorrect = ~is_error;
-    assign success = ~is_error;
+    assign success = is_done & ~is_error;
     assign {wires.DP, wires.DM} = buffer ? BS_SE0 : BS_NC;
 
     always_comb begin
         in_start = 1'b0; out_start = 1'b0;
-        dataOut = 64'd0;
+        dataOut = 64'd0; isAddr = 1'b0;
         if (address) begin
             out_start = 1'b1;
-            dataOut = {48'b0, mempage};
+            dataOut = {mempage, 48'b0};
+            isAddr = 1'b1;
             // in_start or out_start should be 1'b1
         end else if (waiting) begin
             if (startRead | startWrite) begin
                 out_start = 1'b1;
-                dataOut = {48'b0, mempage};
+                dataOut = {mempage, 48'b0};
             end
         end else if (writing) begin
             out_start = 1'b1;
@@ -1195,8 +1233,13 @@ module ReadWriteFSM (
             end
             // DONE and ERROR
             else if (is_done) begin
+                waiting <= 1'b1;
+                address <= 1'b0;
+                buffer <= 1'b0;
+                reading <= 1'b0;
+                writing <= 1'b0;
                 is_done <= 1'b0;
-                is_error <= 1'b1;
+                is_error <= 1'b0;
             end
             // ADDRESS
             else if (address & finished) begin
@@ -1262,6 +1305,8 @@ module ProtocolHandler (
     assign startData = (currState == SEND_DATA0) & ~finishedData;
     assign startAckIn = (currState == REC_ACK) & ~(finishedAckIn | finishedNackIn);
     assign startNackIn = (currState == REC_ACK) & ~(finishedNackIn | finishedAckIn);
+    assign finished = currState == DONE;
+    assign error = currState == ERROR;
 
     // State Transitions
     always_comb begin
@@ -1360,59 +1405,60 @@ module USBHost (
   input logic clock, reset_n
 );
 logic startOut, startIn, startDataIn, startAck, startNack, startAckIn, startNackIn;
-logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn, finishedNackIn;
+logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn;
+logic dataCorrect, isAck, isNak, ackTimeout, dataTimeout;
 
 logic startData, finishedData;
 logic [15:0] mempageAt;
-logic [63:0] dataSend, dataDetected, dataOut, dataReceived;
+logic [63:0] dataSend, dataOut, dataReceived;
+logic isAddr;
 
-InOutPacket #(0) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n),
-                      .finishedOut(finishedOut), .wires(wires));
-InOutPacket #(1) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n),
-                      .finishedOut(finishedIn), .wires(wires));
-AckNackPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n),
+InOutPacket #(1) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n),
+                      .finishedOut(finishedOut), .wires(wires), .isAddr);
+InOutPacket #(0) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n),
+                      .finishedOut(finishedIn), .wires(wires), .isAddr);
+AckNakPacket #(1) ACK (.startOut(startAck), .clock(clock), .reset_n(reset_n),
                         .finishedOut(finishedAck), .wires(wires));
-AckNackPacket #(0) NACK (.startOut(startNack), .clock(clock),
+AckNakPacket #(0) NACK (.startOut(startNack), .clock(clock),
                          .reset_n(reset_n),
                          .finishedOut(finishedNack), .wires(wires));
-DataPacket Test (.startOut(startData), .data(dataSend), .clock(clock),
+DataPacket Test (.startOut(startData), .data(dataOut), .clock(clock),
                  .reset_n(reset_n),
                  .finishedOut(finishedData), .wires(wires));
-DataInPacket Test2 (.wires(wires), .start(startDataIn), .clock(clock),
-                    .reset_n(reset_n), .finished(finishedDataIn),
-                    .data(dataDetected));
+DataInPacket Test2 (.wires(wires), .startOut(startDataIn), .clock(clock),
+                    .reset_n(reset_n), .finishedOut(finishedDataIn),
+                    .dataOut(dataReceived), .correct(dataCorrect),
+                    .timedout(dataTimeout));
 
-AckNackInPacket #(0) ACKTest (.wires(wires), .start(startAckIn), .clock(clock),
-                              .reset_n(reset_n), .finished(finishedAckIn));
-AckNackInPacket #(1) ACKTest1 (.wires(wires), .start(startNackIn), .clock(clock),
-                              .reset_n(reset_n), .finished(finishedNackIn));
+AckNakInPacket ACKTest (.wires(wires), .startOut(startAckIn), .clock(clock),
+                              .reset_n(reset_n), .finishedOut(finishedAckIn),
+                         .isAck, .isNak, .timedout(ackTimeout));
 
 logic startRead, startWrite, proHandFinished, proHandError;
 logic in_start, out_start;
 logic read_write_FSM_done, isValueReadCorrect, writeSuccess;
 ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startRead, .startWrite,
                     .finished(proHandFinished), .error(proHandError),
-                    .in_start, .out_start,
-                    .mempage(mempageAt), .dataSend, .dataOut, .dataReceived,
+                    .in_start, .out_start, .isAddr,
+                    .mempage(mempageAt), .dataSend, .dataOut,
                     .read_write_FSM_done, .isValueReadCorrect,
                     .success(writeSuccess));
 ProtocolHandler proHand(.wires, .clock, .reset_n, .in_start, .out_start,
                         .finishedIn, .finishedOut, .finishedAck, .finishedNack,
-                        .finishedAckIn, .finishedNackIn,
-                        // TODO: errorDataIn
-                        .finishedData, .finishedDataIn, .errorDataIn(1'b0),
+                        .finishedAckIn(finishedAckIn & isAck & ~isNak),
+                        .finishedNackIn(finishedAckIn & ~isAck & isNak),
+                        .finishedData, .finishedDataIn, .errorDataIn(~dataCorrect),
                         .startOut, .startIn, .startAck, .startNack,
                         .startAckIn, .startNackIn, .startData,
                         .startDataIn, .finished(proHandFinished),
                         .error(proHandError));
 
 task prelabRequest();
-  start = 1;
-  dataSend = 64'h40aa_11b7_682d_f6d8;
-
-  while (!finished) begin
-    @(posedge clock);
-  end
+//   start = 1;
+//
+//   while (!finished) begin
+//     @(posedge clock);
+//   end
 endtask : prelabRequest
 
 task readData
@@ -1423,14 +1469,18 @@ task readData
   output logic [63:0] data, // Vector of bytes to write
   output logic success);
 
+    @(posedge clock);
     mempageAt <= mempage;
     startRead <= 1'b1;
+    startWrite <= 1'b0;
 
     wait (read_write_FSM_done);
+    @(posedge clock);
 
     startRead <= 1'b0;
     data <= dataReceived;
     success <= isValueReadCorrect;
+    @(posedge clock);
 endtask : readData
 
 task writeData
@@ -1444,11 +1494,14 @@ task writeData
     mempageAt <= mempage;
     dataSend <= data;
     startWrite <= 1'b1;
+    startRead <= 1'b0;
 
     wait (read_write_FSM_done);
+    @(posedge clock);
 
     startWrite <= 1'b0;
     success <= writeSuccess;
+    @(posedge clock);
 endtask : writeData
 
 // Testing for NRZI
@@ -1549,7 +1602,7 @@ endtask : writeData
 //     assert(done) else $error("done not asserted");
 //     assert(correct) else $error("correct not asserted: %x", crc16);
 // endtask: testCRC16Checker
-  
+
 endmodule : USBHost
 
 
