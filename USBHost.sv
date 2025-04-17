@@ -1548,7 +1548,6 @@ ProtocolHandler proHand(.wires, .clock, .reset_n, .in_start, .out_start,
 
 task prelabRequest();
 endtask : prelabRequest
-
 task readData
 // Host sends mempage to thumb drive using a READ (OUT->DATA0->IN->DATA0)
 // transaction, and then receives data from it. This task should return both
