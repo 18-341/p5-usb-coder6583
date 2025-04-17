@@ -5,7 +5,9 @@ typedef enum logic [1:0]
   {BS_J = 2'b10, BS_K = 2'b01, BS_SE0 = 2'b00, BS_SE1 = 2'b11, BS_NC = 2'bzz}
   bus_state_t;
 
-
+// NRZI encoding module
+// Takes in a serial input and ready signal
+// When ready is asserted, the module is enabled
 module NRZI (
   input logic stream,
   input logic ready,
@@ -34,6 +36,9 @@ module NRZI (
     end
 endmodule : NRZI
 
+// NRZI Decoding module
+// Takes in a serial input and ready signal
+// When ready is asserted, the module is enabled
 module NRZIDecoder (
     input logic stream,
     input logic ready,
@@ -66,6 +71,10 @@ module NRZIDecoder (
     end
 endmodule : NRZIDecoder
 
+// Bit Stuffer module
+// Takes in a parallel input and ready signal
+// Outputs a stream that is bit stuffed
+// Outputs finished signal when done processing all bits
 module BitStuffer
 #(WIDTH = 24)
 (
@@ -112,6 +121,10 @@ module BitStuffer
   end
 endmodule : BitStuffer
 
+// Bit Unstuffer module
+// Takes in a serial input and ready signal
+// Outputs a stream that is bit unstuffed, and outputs hold when
+// we should ignore a stream in the bit stream decoder
 module BitUnstuffer (
     input logic clock, reset_n,
     input logic stream,
@@ -153,6 +166,9 @@ module BitUnstuffer (
     end
 endmodule : BitUnstuffer
 
+// Bit Stream Decoder module
+// Takes in a serial input, ready, and hold signal
+// Outputs a parallel output with WIDTH width, and finished signal
 module BitStreamDecoder #(WIDTH = 32)
 (
     input logic clock, reset_n,
@@ -202,6 +218,9 @@ module BitStreamDecoder #(WIDTH = 32)
     end
 endmodule : BitStreamDecoder
 
+// Calculates CRC5 of signal with specified WIDTH
+// Takes in parallel input and ready signal.
+// Outputs done when done calculating, with the CRC5 on out
 module CRC5
 #(WIDTH = 11)
 (
@@ -249,6 +268,10 @@ module CRC5
   end
 endmodule : CRC5
 
+// CRC5 Checker module that checks if the received values are correct
+// Takes in serial input, ready
+// When done calculating, waits until ready is deasserted
+// Outputs a done signal and correct signal
 module CRC5Checker #(WIDTH = 11) (
     input logic clock, reset_n,
     input logic stream,
@@ -300,6 +323,12 @@ module CRC5Checker #(WIDTH = 11) (
     end
 endmodule : CRC5Checker
 
+// CRC16 module to calculate CRC16 for DATA field
+// Takes in a signal with width WIDTH and calculates its CRC16
+// Calculation starts when ready is first asserted, and
+// even if calculation is done, it holds until ready is deasserted
+// When done calculating, done will be asserted, and
+// the value will be on out
 module CRC16 #(WIDTH = 64) (
     input logic clock, reset_n,
     input logic [WIDTH-1:0] parallelIn,
@@ -348,6 +377,11 @@ module CRC16 #(WIDTH = 64) (
     end
 endmodule : CRC16
 
+// CRC16 Checker module to make sure correct data was sent in DATA field
+// Takes in a serial input, ready signal, and hold signal
+// Will be connected to BitUnstuffer in the same manner to BitStreamDecoder
+// Should be asserting done and correct at the same time as
+// the done signal from BitStreamDecoder
 module CRC16Checker #(WIDTH = 64) (
     input logic clock, reset_n,
     input logic stream,
@@ -394,6 +428,7 @@ module CRC16Checker #(WIDTH = 64) (
     end
 endmodule : CRC16Checker
 
+// Revereses the order of bits, used for LSB and MSB manipulation
 module Reverse
 #(WIDTH = 7)
 (input logic [WIDTH-1:0] in,
@@ -407,6 +442,10 @@ module Reverse
 endmodule : Reverse
 
 // TYPE: 0 is IN, 1 is OUT
+// Sends IN/OUT packet starting from when startOut is asserted
+// isAddr shows if the OUT packet is sending the address or actual data
+// which is needed to control the endpoint.
+// Drives the wires only when startOut is asserted
 module InOutPacket #(TYPE = 0) (
   input logic startOut,
   input logic isAddr,
@@ -571,6 +610,7 @@ module InOutPacket #(TYPE = 0) (
   end
 endmodule : InOutPacket
 
+// Constructs DataPacket and sends it to the modules
 module DataPacket (
   input logic startOut,
   input logic [63:0] data,
@@ -723,6 +763,11 @@ module DataPacket (
   end
 endmodule : DataPacket
 
+// Receive a DATA packet
+// When startout is asserted, start waiting
+// Waits for a edge between K and J, for receiving to start
+// If the edge doesn't come for 255 cycles, assert timedout
+// Checks the CRC16 and outputs whether the DATA packet is valid or not
 module DataInPacket (
   input logic startOut,
   input logic clock, reset_n,
@@ -910,6 +955,8 @@ endmodule : DataInPacket
 
 // TYPE
 // 0: NAK, 1: ACK
+// Sends ACK/NAK packet
+//
 module AckNakPacket #(TYPE = 0) (
   input logic startOut,
   input logic clock, reset_n,
@@ -1018,6 +1065,10 @@ module AckNakPacket #(TYPE = 0) (
   end
 endmodule : AckNakPacket
 
+// Receives ACK/NAK packet
+// Outputs whether the packet is an ACK or a NAK
+// Waits for the K/J edge
+// Timesout at 255 clock cycle
 module AckNakInPacket (
   input logic startOut,
   input logic clock, reset_n,
@@ -1173,7 +1224,10 @@ module AckNakInPacket (
     end
 endmodule : AckNakInPacket
 
-
+// Controls the transactions for Read/Write
+// Read is OUT -> IN
+// Write is OUT -> OUT
+// Also controls the DATA that is sent
 module ReadWriteFSM (
     USBWires wires,
     input logic clock, reset_n,
@@ -1291,7 +1345,13 @@ module ReadWriteFSM (
 endmodule : ReadWriteFSM
 
 
-
+// Controls the packets for transactions
+// OUT transaction
+// OUT -> DATA0 -> ACK
+// IN transaction
+// IN -> Receive DATA0 -> ACK/NAK
+// Handles timeout and retries, max 7 times for both
+// Sends NAK if there is an error
 module ProtocolHandler (
     USBWires wires,
     input logic clock, reset_n,
@@ -1323,8 +1383,10 @@ module ProtocolHandler (
     assign startNack = (currState == SEND_NAK) & ~finishedNack;
     assign startOut = (currState == SEND_OUT) & ~finishedOut;
     assign startData = (currState == SEND_DATA0) & ~finishedData;
-    assign startAckIn = (currState == REC_ACK) & ~(finishedAckIn | finishedNackIn);
-    assign startNackIn = (currState == REC_ACK) & ~(finishedNackIn | finishedAckIn);
+    assign startAckIn = (currState == REC_ACK) &
+                         ~(finishedAckIn | finishedNackIn);
+    assign startNackIn = (currState == REC_ACK) &
+                         ~(finishedNackIn | finishedAckIn);
     assign finished = currState == DONE || currState == ERROR;
     assign error = currState == ERROR;
 
@@ -1360,6 +1422,7 @@ module ProtocolHandler (
             end
             SEND_NAK: begin
                 if (finishedNack) begin
+                    // If retry is not at max
                     if(retries < max && timeouts < max) begin
                         nextState = REC_DATA0;
                     end else begin
@@ -1379,6 +1442,7 @@ module ProtocolHandler (
             end
             REC_ACK: begin
                 if (finishedNackIn | ackTimeout) begin
+                    // If retry is not at max
                     if (retries < max - 1 && timeouts < max - 1) begin
                         nextState = SEND_DATA0;
                     end else begin
@@ -1397,6 +1461,7 @@ module ProtocolHandler (
         endcase
     end
 
+    // updates the retries and timeouts
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             currState <= WAIT;
@@ -1422,13 +1487,15 @@ module ProtocolHandler (
     end
 endmodule : ProtocolHandler
 
-
+// The host that instantiates all of the modules above
 module USBHost (
   USBWires wires,
   input logic clock, reset_n
 );
-logic startOut, startIn, startDataIn, startAck, startNack, startAckIn, startNackIn;
-logic finishedOut, finishedIn, finishedDataIn, finishedAck, finishedNack, finishedAckIn;
+logic startOut, startIn, startDataIn, startAck,
+      startNack, startAckIn, startNackIn;
+logic finishedOut, finishedIn, finishedDataIn,
+      finishedAck, finishedNack, finishedAckIn;
 logic dataCorrect, isAck, isNak, ackTimeout, dataTimeout;
 
 logic startData, finishedData;
@@ -1436,6 +1503,7 @@ logic [15:0] mempageAt;
 logic [63:0] dataSend, dataOut, dataReceived;
 logic isAddr;
 
+// All packets instantiated
 InOutPacket #(1) OUT (.startOut(startOut), .clock(clock), .reset_n(reset_n),
                       .finishedOut(finishedOut), .wires(wires), .isAddr);
 InOutPacket #(0) IN  (.startOut(startIn), .clock(clock), .reset_n(reset_n),
@@ -1452,7 +1520,6 @@ DataInPacket Test2 (.wires(wires), .startOut(startDataIn), .clock(clock),
                     .reset_n(reset_n), .finishedOut(finishedDataIn),
                     .dataOut(dataReceived), .correct(dataCorrect),
                     .timedout(dataTimeout));
-
 AckNakInPacket ACKTest (.wires(wires), .startOut(startAckIn), .clock(clock),
                               .reset_n(reset_n), .finishedOut(finishedAckIn),
                          .isAck, .isNak, .timedout(ackTimeout));
@@ -1461,7 +1528,8 @@ logic startRead, startWrite, proHandFinished, proHandError;
 logic startFSM;
 logic in_start, out_start;
 logic read_write_FSM_done, isValueReadCorrect, writeSuccess;
-ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startFSM, .startRead, .startWrite,
+ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startFSM, .startRead,
+                    .startWrite,
                     .finished(proHandFinished), .error(proHandError),
                     .in_start, .out_start, .isAddr,
                     .mempage(mempageAt), .dataSend, .dataOut,
@@ -1471,23 +1539,19 @@ ProtocolHandler proHand(.wires, .clock, .reset_n, .in_start, .out_start,
                         .finishedIn, .finishedOut, .finishedAck, .finishedNack,
                         .finishedAckIn(finishedAckIn & isAck & ~isNak),
                         .finishedNackIn(finishedAckIn & ~isAck & isNak),
-                        .finishedData, .finishedDataIn, .errorDataIn(~dataCorrect),
+                        .finishedData, .finishedDataIn,
+                        .errorDataIn(~dataCorrect),
                         .startOut, .startIn, .startAck, .startNack,
                         .startAckIn, .startNackIn, .startData,
                         .startDataIn, .finished(proHandFinished),
                         .error(proHandError), .ackTimeout, .dataTimeout);
 
 task prelabRequest();
-//   start = 1;
-//
-//   while (!finished) begin
-//     @(posedge clock);
-//   end
 endtask : prelabRequest
 
 task readData
 // Host sends mempage to thumb drive using a READ (OUT->DATA0->IN->DATA0)
-// transaction, and then receives data from it. This task should return both the
+// transaction, and then receives data from it. This task should return both
 // data and the transaction status, successful or unsuccessful, to the caller.
 ( input logic [15:0] mempage, // Page to write
   output logic [63:0] data, // Vector of bytes to write
@@ -1533,111 +1597,5 @@ task writeData
     success <= writeSuccess;
     @(posedge clock);
 endtask : writeData
-
-// Testing for NRZI
-// logic stream, ready, out, check;
-// NRZI nrzi(.stream, .ready, .clock, .reset_n, .out);
-// NRZIDecoder(.stream(out), .ready, .clock, .reset_n, .out(check));
-//
-// task testNRZI();
-//     ready <= 1'b1;
-//     @(posedge clock);
-//     repeat(50) begin
-//         stream <= $urandom_range(1, 0);
-//         assert(stream == check) else $error("not equal");
-//         @(posedge clock);
-//     end
-// endtask : testNRZI
-
-// Testing for BitUnstuffer + BitStreamDecoder
-// logic stream, ready, unstuffReady, out, hold, fin, bsFin;
-// logic [31:0] parallelOut, parallelIn;
-// BitStuffer #32 bs(.clock, .reset_n, .out(stream), .ready,
-//                   .parallelIn, .finished(bsFin));
-// BitUnstuffer bu(.clock, .reset_n, .stream, .ready(unstuffReady), .out, .hold);
-// BitStreamDecoder #32 bsd(.clock, .reset_n, .out, .ready(unstuffReady),
-//                          .stream(out), .out(parallelOut), .hold,
-//                          .finished(fin));
-//
-// task testUnstuffing();
-//     ready <= 1'b1;
-//     @(posedge clock);
-//     unstuffReady <= 1'b1;
-//
-//     while(!fin)
-//         @(posedge clock);
-//     @(posedge clock);
-//     assert(parallelIn == parallelOut)
-//         else $error("%b != %b", parallelIn, parallelOut);
-//     @(posedge clock);
-// endtask: testUnstuffing
-
-// Testing for CRC5 checker
-// logic stream, ready, done, correct, crc5done, crc5ready;
-// logic [10:0] parallelIn;
-// logic [4:0] crc5;
-// CRC5 crc(.parallelIn, .ready(crc5ready), .done(crc5done), .out(crc5),
-//          .clock, .reset_n);
-// CRC5Checker #16 crccheck(.clock, .reset_n, .stream, .ready, .done,
-//                          .correct);
-//
-// task testCRC5Checker();
-//     crc5ready <= 1'b1;
-//     parallelIn <= 11'b00001000111;
-//     while(!crc5done)
-//         @(posedge clock);
-//     ready <= 1'b1;
-//     @(posedge clock);
-//     for (int i = 10; i >= 0; i=i-1) begin
-//         stream <= parallelIn[i];
-//         @(posedge clock);
-//     end
-//     for (int i = 4; i >= 0; i=i-1) begin
-//         stream <= ~crc5[i];
-//         @(posedge clock);
-//     end
-//     @(posedge clock);
-//     @(posedge clock);
-//     assert(done) else $error("done not asserted");
-//     assert(correct) else $error("correct not asserted: %b", crc5);
-// endtask: testCRC5Checker
-
-// Testing for CRC16 checker
-// logic stream, ready, done, correct, crc16done, crc16ready;
-// logic [63:0] parallelIn;
-// logic [15:0] crc16;
-// CRC16 crc(.parallelIn, .ready(crc16ready), .done(crc16done), .out(crc16),
-//          .clock, .reset_n);
-// CRC16Checker #80 crccheck(.clock, .reset_n, .stream, .ready, .done,
-//                          .correct);
-//
-// task testCRC16Checker();
-//     crc16ready <= 1'b1;
-//     parallelIn <= 64'h40aa_11b7_682d_f6d8;
-//     while(!crc16done)
-//         @(posedge clock);
-//     ready <= 1'b1;
-//     @(posedge clock);
-//     ready <= 1'b0;
-//     for (int i = 63; i >= 0; i=i-1) begin
-//         stream <= parallelIn[i];
-//         @(posedge clock);
-//     end
-//     for (int i = 15; i >= 0; i=i-1) begin
-//         stream <= ~crc16[i];
-//         @(posedge clock);
-//     end
-//     @(posedge clock);
-//     @(posedge clock);
-//     assert(done) else $error("done not asserted");
-//     assert(correct) else $error("correct not asserted: %x", crc16);
-// endtask: testCRC16Checker
-
 endmodule : USBHost
-
-
-
-
-
-
 
