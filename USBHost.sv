@@ -890,7 +890,6 @@ module DataInPacket (
     logic [8:0] timeoutCnt;
 
     assign isTO = timeoutCnt == 9'd255;
-    assign timedout = isTO;
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
@@ -898,10 +897,13 @@ module DataInPacket (
         end else begin
             if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
+                timedout <= 1'b0;
                 if (isTO) begin
                     timeoutCnt <= '0;
+                    timedout <= 1'b1;
                 end
             end else begin
+                timedout <= 1'b0;
                 timeoutCnt <= '0;
             end
         end
@@ -1163,11 +1165,13 @@ module AckNakInPacket (
         end else begin
             if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
+                timedout <= 1'b0;
                 if (isTO) begin
                     timedout <= 1'b1;
                     timeoutCnt <= '0;
                 end
             end else begin
+                timedout <= 1'b0;
                 timeoutCnt <= '0;
             end
         end
@@ -1179,6 +1183,7 @@ module ReadWriteFSM (
     USBWires wires,
     input logic clock, reset_n,
     input logic startRead, startWrite,
+    input logic startFSM,
     input logic finished, error,
     input logic [15:0] mempage,
     input logic [63:0] dataSend,
@@ -1208,7 +1213,7 @@ module ReadWriteFSM (
             isAddr = 1'b1;
             // in_start or out_start should be 1'b1
         end else if (waiting) begin
-            if (startRead | startWrite) begin
+            if (startFSM) begin
                 out_start = 1'b1;
                 dataOut = {mempage, 48'b0};
             end
@@ -1247,7 +1252,7 @@ module ReadWriteFSM (
                 end
             end
             // DONE and ERROR
-            else if (is_done) begin
+            else if (is_done | is_error) begin
                 waiting <= 1'b1;
                 address <= 1'b0;
                 buffer <= 1'b0;
@@ -1259,7 +1264,10 @@ module ReadWriteFSM (
             // ADDRESS
             else if (address & finished) begin
                 address <= 1'b0;
-                if (startRead) begin
+                if (error) begin
+                    is_error <= 1'b1;
+                    is_done <= 1'b1;
+                end else if (startRead) begin
                     reading <= 1'b1;
                 end else if (startWrite) begin
                     writing <= 1'b1;
@@ -1277,7 +1285,7 @@ module ReadWriteFSM (
             end
             // WAITING
             else if (waiting) begin
-                if (startRead | startWrite) begin
+                if (startFSM) begin
                     waiting <= 1'b0;
                     address <= 1'b1;
                     is_error <= 1'b0;
@@ -1307,7 +1315,8 @@ module ProtocolHandler (
     output logic finished, error
 );
 
-    logic [3:0] retries, timeouts;
+    logic [3:0] retries, timeouts, max;
+    assign max = 4'd7;
 
     enum logic [3:0] {WAIT, SEND_IN, SEND_OUT, REC_DATA0,
                       SEND_DATA0, SEND_ACK, SEND_NAK,
@@ -1321,7 +1330,7 @@ module ProtocolHandler (
     assign startData = (currState == SEND_DATA0) & ~finishedData;
     assign startAckIn = (currState == REC_ACK) & ~(finishedAckIn | finishedNackIn);
     assign startNackIn = (currState == REC_ACK) & ~(finishedNackIn | finishedAckIn);
-    assign finished = currState == DONE;
+    assign finished = currState == DONE || currState == ERROR;
     assign error = currState == ERROR;
 
     // State Transitions
@@ -1356,7 +1365,7 @@ module ProtocolHandler (
             end
             SEND_NAK: begin
                 if (finishedNack) begin
-                    if(retries < 8 && timeouts < 8) begin
+                    if(retries < max && timeouts < max) begin
                         nextState = REC_DATA0;
                     end else begin
                         nextState = ERROR;
@@ -1375,7 +1384,7 @@ module ProtocolHandler (
             end
             REC_ACK: begin
                 if (finishedNackIn | ackTimeout) begin
-                    if (retries < 8 && timeouts < 8) begin
+                    if (retries < max && timeouts < max) begin
                         nextState = SEND_DATA0;
                     end else begin
                         nextState = ERROR;
@@ -1401,29 +1410,15 @@ module ProtocolHandler (
         end else begin
             currState <= nextState;
             if (currState == REC_DATA0) begin
-                if (finishedDataIn & errorDataIn & retries < 8)
+                if (finishedDataIn & errorDataIn)
                     retries <= retries + 4'd1;
-                else if (finishedDataIn & dataTimeout & timeouts < 8)
+                else if (finishedDataIn & dataTimeout)
                     timeouts <= timeouts + 4'd1;
-                else if (retries == 8) begin
-                    retries <= 4'd0;
-                    timeouts <= 4'd0;
-                end else if (timeouts == 8) begin
-                    timeouts <= 4'd0;
-                    retries <= 4'd0;
-                end
             end else if (currState == REC_ACK) begin
-                if (finishedNackIn & retries < 8)
+                if (finishedNackIn)
                     retries <= retries + 4'd1;
-                else if (ackTimeout & timeouts < 8)
+                else if (ackTimeout)
                     timeouts <= timeouts + 4'd1;
-                else if (retries == 8) begin
-                    retries <= 4'd0;
-                    timeouts <= 4'd0;
-                end else if (timeouts == 8) begin
-                    retries <= 4'd0;
-                    timeouts <= 4'd0;
-                end
             end else if (currState == DONE || currState == ERROR) begin
                 retries <= 4'd0;
                 timeouts <= 4'd0;
@@ -1468,9 +1463,10 @@ AckNakInPacket ACKTest (.wires(wires), .startOut(startAckIn), .clock(clock),
                          .isAck, .isNak, .timedout(ackTimeout));
 
 logic startRead, startWrite, proHandFinished, proHandError;
+logic startFSM;
 logic in_start, out_start;
 logic read_write_FSM_done, isValueReadCorrect, writeSuccess;
-ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startRead, .startWrite,
+ReadWriteFSM rwFSM (.wires, .clock, .reset_n, .startFSM, .startRead, .startWrite,
                     .finished(proHandFinished), .error(proHandError),
                     .in_start, .out_start, .isAddr,
                     .mempage(mempageAt), .dataSend, .dataOut,
@@ -1506,11 +1502,14 @@ task readData
     mempageAt <= mempage;
     startRead <= 1'b1;
     startWrite <= 1'b0;
+    startFSM <= 1'b1;
+    @(posedge clock);
+    startFSM <= 1'b0;
 
     wait (read_write_FSM_done);
+    startRead <= 1'b0;
     @(posedge clock);
 
-    startRead <= 1'b0;
     data <= dataReceived;
     success <= isValueReadCorrect;
     @(posedge clock);
@@ -1528,11 +1527,14 @@ task writeData
     dataSend <= data;
     startWrite <= 1'b1;
     startRead <= 1'b0;
+    startFSM <= 1'b1;
+    @(posedge clock);
+    startFSM <= 1'b0;
 
     wait (read_write_FSM_done);
+    startWrite <= 1'b0;
     @(posedge clock);
 
-    startWrite <= 1'b0;
     success <= writeSuccess;
     @(posedge clock);
 endtask : writeData
