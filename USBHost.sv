@@ -890,6 +890,7 @@ module DataInPacket (
     logic [8:0] timeoutCnt;
 
     assign isTO = timeoutCnt == 9'd255;
+    assign timedout = isTO;
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
@@ -897,13 +898,10 @@ module DataInPacket (
         end else begin
             if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
-                timedout <= 1'b0;
                 if (isTO) begin
                     timeoutCnt <= '0;
-                    timedout <= 1'b1;
                 end
             end else begin
-                timedout <= 1'b0;
                 timeoutCnt <= '0;
             end
         end
@@ -1157,21 +1155,18 @@ module AckNakInPacket (
     logic [8:0] timeoutCnt;
 
     assign isTO = timeoutCnt == 9'd255;
+    assign timedout = isTO;
 
     always_ff @(posedge clock, negedge reset_n) begin
         if (~reset_n) begin
             timeoutCnt <= '0;
-            timedout <= 1'b0;
         end else begin
             if (startOut & waiting) begin
                 timeoutCnt <= timeoutCnt + 9'b1;
-                timedout <= 1'b0;
                 if (isTO) begin
-                    timedout <= 1'b1;
                     timeoutCnt <= '0;
                 end
             end else begin
-                timedout <= 1'b0;
                 timeoutCnt <= '0;
             end
         end
@@ -1384,7 +1379,7 @@ module ProtocolHandler (
             end
             REC_ACK: begin
                 if (finishedNackIn | ackTimeout) begin
-                    if (retries < max && timeouts < max) begin
+                    if (retries < max - 1 && timeouts < max - 1) begin
                         nextState = SEND_DATA0;
                     end else begin
                         nextState = ERROR;
